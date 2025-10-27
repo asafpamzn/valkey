@@ -39,13 +39,9 @@ run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
     -D "$PRE1_DIR" \
     --track-mem \
     --tcp-close \
+    --ext-unix-sk \
     --ghost-limit 64M \
-    --shell-job \
     -v4 -o "$PRE1_LOG"
-
-#grep -q "Dumping finished successfully" "$PRE1_LOG" \
-#  && echo "✅ Pre-dump #1 completed" \
-#  || { echo "⚠️  Pre-dump #1 did not report success. See $PRE1_LOG"; exit 1; }
 
 # ========= Pre-dump #2 =========
 PRE2_LOG="$PRE2_DIR/dump.log"
@@ -56,13 +52,9 @@ run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
     --track-mem \
     --prev-images-dir "$PRE1_DIR" \
     --tcp-close \
+    --ext-unix-sk \
     --ghost-limit 64M \
-    --shell-job \
     -v4 -o "$PRE2_LOG"
-
-#grep -q "Dumping finished successfully" "$PRE2_LOG" \
-#  && echo "✅ Pre-dump #2 completed" \
-#  || { echo "⚠️  Pre-dump #2 did not report success. See $PRE2_LOG"; exit 1; }
 
 # ========= Final dump (leave-running) =========
 FINAL_LOG="$FINAL_DIR/dump.log"
@@ -74,8 +66,8 @@ run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
     --prev-images-dir "$PRE2_DIR" \
     --leave-running \
     --tcp-close \
+    --ext-unix-sk \
     --ghost-limit 64M \
-    --shell-job \
     -v4 -o "$FINAL_LOG"
 
 if sudo grep -q "Dumping finished successfully" "$FINAL_LOG"; then
@@ -91,5 +83,4 @@ echo "📁 Image sets:"
 sudo du -sh "$PRE1_DIR" "$PRE2_DIR" "$FINAL_DIR" | sort -h
 echo
 echo "📝 Tip: restore with:"
-echo "  sudo criu restore -D $FINAL_DIR --tcp-close --shell-job -v4 -o $FINAL_DIR/restore.log"
-
+echo "  sudo criu restore -D $FINAL_DIR --tcp-close --ext-unix-sk -v4 -o $FINAL_DIR/restore.log"
