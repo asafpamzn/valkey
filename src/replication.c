@@ -5127,6 +5127,16 @@ void replicationCron(void) {
      * handling the failover. */
     updateFailoverStatus();
 
+    /* Force backlog creation for standalone primaries when repl-backlog-ttl is 0.
+     * This supports scenarios like CRIU where we copy a primary process and want
+     * to PSYNC from the copied instance to the original. */
+    if (server.primary_host == NULL && 
+        server.repl_backlog == NULL && 
+        server.repl_backlog_time_limit == 0) {
+        createReplicationBacklog();
+        serverLog(LL_NOTICE, "Replication backlog created for standalone primary (repl-backlog-ttl 0)");
+    }
+
     /* Non blocking connection timeout? */
     if (server.primary_host && (server.repl_state == REPL_STATE_CONNECTING || replicaIsInHandshakeState()) &&
         (time(NULL) - server.repl_transfer_lastio) > server.repl_timeout) {
