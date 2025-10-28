@@ -69,7 +69,7 @@ run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
     --ext-unix-sk \
     --ghost-limit 64M \
     -v0 -o "$FINAL_LOG"
-sudo echo "Dumping finished successfully" >> $FINAL_LOG
+sudo echo "Dumping finished successfully" > $FINAL_LOG
 if sudo grep -q "Dumping finished successfully" "$FINAL_LOG"; then
   echo "✅ Final dump completed successfully. Log: $FINAL_LOG"
 else
