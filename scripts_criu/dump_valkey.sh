@@ -85,6 +85,7 @@ run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \
       --images-dir  "$FINAL_DIR" \
       --address "$SRC_HOST"\
       --lazy-pages \
+      --leave-running \
       --port "$LAZY_PAGES_PORT" \
       --tcp-close \
       --ext-unix-sk \
