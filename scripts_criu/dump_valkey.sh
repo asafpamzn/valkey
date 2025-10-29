@@ -79,8 +79,7 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   echo "   Pages will be served on-demand from memory (not written to disk)"
 
   FINAL_LOG="$FINAL_DIR/dump.log"
-  run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \
-    sudo criu dump --tree <pid> --images-dir <dir> --lazy-pages --address <src> --port <port>
+  run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \    
     sudo criu dump \
       --tree "$pid" \
       --images-dir  "$FINAL_DIR" \
@@ -94,7 +93,6 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   sudo echo "Dumping finished successfully" > $FINAL_LOG
   echo "✅ Dump completed successfully. Log: $FINAL_LOG"
 
-fi  
 else
   # ============================================
   # TRADITIONAL MODE (FSx with pre-dumps)
