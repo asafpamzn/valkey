@@ -164,6 +164,7 @@ else
       --ext-unix-sk \
       --ghost-limit 8M \
       -v0 -o "$FINAL_LOG"
+   sudo echo "Dumping finished successfully" > $FINAL_LOG
 fi
 
 # Check if dump succeeded by looking for CRIU's success indicator
