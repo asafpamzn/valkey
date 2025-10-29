@@ -49,54 +49,100 @@ run_phase () {
   awk -v s="$start" -v e="$end" 'BEGIN { printf "⏱  %s took %.3f s\n", "", (e - s) }'
 }
 
-# Build page-server flags if enabled
+# Build page-server flags and directory flags based on mode
 PAGE_SERVER_FLAGS=""
+PRE1_DIR_FLAG="-D $PRE1_DIR"
+PRE2_DIR_FLAG="-D $PRE2_DIR"
+PRE1_PREV_DIR_FLAG=""
+PRE2_PREV_DIR_FLAG="--prev-images-dir $PRE1_DIR"
+
 if [ "$USE_PAGE_SERVER" = "true" ]; then
   PAGE_SERVER_FLAGS="--page-server --address $DEST_HOST --port $PAGE_SERVER_PORT"
+  # In page-server mode, pre-dumps don't use -D flag (pages stream to network)
+  PRE1_DIR_FLAG=""
+  PRE2_DIR_FLAG=""
+  # prev-images-dir not needed in page-server mode for pre-dumps
+  PRE2_PREV_DIR_FLAG=""
   echo "📡 Page-server mode enabled - will stream pages to $DEST_HOST:$PAGE_SERVER_PORT"
+  echo "   Pre-dumps will stream to network, final dump will write to $FINAL_DIR"
 fi
 
 # ========= Pre-dump #1 =========
 PRE1_LOG="$PRE1_DIR/dump.log"
-run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
-  sudo criu pre-dump \
-    -t "$pid" \
-    -D "$PRE1_DIR" \
-    --track-mem \
-    --tcp-close \
-    --ext-unix-sk \
-    --ghost-limit 8M \
-    $PAGE_SERVER_FLAGS \
-    -v0 -o "$PRE1_LOG"
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  run_phase "Pre-dump #1 (streaming to page-server)" \
+    sudo criu pre-dump \
+      -t "$pid" \
+      --track-mem \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      $PAGE_SERVER_FLAGS \
+      -v0 -o "$PRE1_LOG"
+else
+  run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
+    sudo criu pre-dump \
+      -t "$pid" \
+      -D "$PRE1_DIR" \
+      --track-mem \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v0 -o "$PRE1_LOG"
+fi
 
 # ========= Pre-dump #2 =========
 PRE2_LOG="$PRE2_DIR/dump.log"
-run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
-  sudo criu pre-dump \
-    -t "$pid" \
-    -D "$PRE2_DIR" \
-    --track-mem \
-    --prev-images-dir "$PRE1_DIR" \
-    --tcp-close \
-    --ext-unix-sk \
-    --ghost-limit 8M \
-    $PAGE_SERVER_FLAGS \
-    -v0 -o "$PRE2_LOG"
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  run_phase "Pre-dump #2 (streaming to page-server)" \
+    sudo criu pre-dump \
+      -t "$pid" \
+      --track-mem \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      $PAGE_SERVER_FLAGS \
+      -v0 -o "$PRE2_LOG"
+else
+  run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
+    sudo criu pre-dump \
+      -t "$pid" \
+      -D "$PRE2_DIR" \
+      --track-mem \
+      --prev-images-dir "$PRE1_DIR" \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v0 -o "$PRE2_LOG"
+fi
 
 # ========= Final dump (leave-running) =========
 FINAL_LOG="$FINAL_DIR/dump.log"
-run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
-  sudo criu dump \
-    -t "$pid" \
-    -D "$FINAL_DIR" \
-    --track-mem \
-    --prev-images-dir "$PRE2_DIR" \
-    --leave-running \
-    --tcp-close \
-    --ext-unix-sk \
-    --ghost-limit 8M \
-    $PAGE_SERVER_FLAGS \
-    -v0 -o "$FINAL_LOG"
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  run_phase "Final dump (leave-running, delta from page-server) to $FINAL_DIR" \
+    sudo criu dump \
+      -t "$pid" \
+      -D "$FINAL_DIR" \
+      --track-mem \
+      --leave-running \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      $PAGE_SERVER_FLAGS \
+      -v0 -o "$FINAL_LOG"
+else
+  run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
+    sudo criu dump \
+      -t "$pid" \
+      -D "$FINAL_DIR" \
+      --track-mem \
+      --prev-images-dir "$PRE2_DIR" \
+      --leave-running \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v0 -o "$FINAL_LOG"
+fi
 
 # Check if dump succeeded by looking for CRIU's success indicator
 if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null || [ $? -eq 0 ]; then
