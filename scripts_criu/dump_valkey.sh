@@ -11,7 +11,7 @@ FINAL_DIR="$BASE_DIR/final"
 
 # Migration mode configuration
 USE_LAZY_PAGES="${USE_LAZY_PAGES:-false}"
-SOURCE_HOST="${SOURCE_HOST:-ec2-54-242-40-47.compute-1.amazonaws.com}"
+DEST_HOST="${DEST_HOST:-ec2-54-87-52-11.compute-1.amazonaws.com}"
 LAZY_PAGES_PORT="${LAZY_PAGES_PORT:-9001}"
 
 # ============================================
@@ -20,7 +20,7 @@ LAZY_PAGES_PORT="${LAZY_PAGES_PORT:-9001}"
 echo "🔧 Configuration:"
 if [ "$USE_LAZY_PAGES" = "true" ]; then
   echo "  Mode: Lazy Pages (network on-demand)"
-  echo "  Source: $SOURCE_HOST:$LAZY_PAGES_PORT"
+  echo "  Destination: $DEST_HOST:$LAZY_PAGES_PORT"
 else
   echo "  Mode: Traditional (FSx with pre-dumps)"
 fi
@@ -89,7 +89,7 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
       --leave-running \
       --lazy-pages \
       --page-server \
-      --address "$SOURCE_HOST" \
+      --address "$DEST_HOST" \
       --port "$LAZY_PAGES_PORT" \
       --tcp-close \
       --ext-unix-sk \

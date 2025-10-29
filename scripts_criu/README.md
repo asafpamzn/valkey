@@ -58,7 +58,7 @@ sudo USE_LAZY_PAGES=true ./auto_restore.sh
 
 #### dump_valkey.sh
 - `USE_LAZY_PAGES`: Enable lazy pages mode (`true`/`false`, default: `false`)
-- `SOURCE_HOST`: Source hostname for lazy pages (default: `ec2-54-242-40-47.compute-1.amazonaws.com`)
+- `DEST_HOST`: Destination hostname to send pages to (default: `ec2-54-87-52-11.compute-1.amazonaws.com`)
 - `LAZY_PAGES_PORT`: Port for lazy-pages server (default: `9001`)
 
 #### auto_restore.sh
@@ -69,11 +69,11 @@ sudo USE_LAZY_PAGES=true ./auto_restore.sh
 ### Example with Custom Configuration
 
 ```bash
-# On source
-sudo USE_LAZY_PAGES=true SOURCE_HOST=10.0.1.100 LAZY_PAGES_PORT=9002 ./dump_valkey.sh
+# On source (sends pages TO destination)
+sudo USE_LAZY_PAGES=true DEST_HOST=10.0.1.100 LAZY_PAGES_PORT=9002 ./dump_valkey.sh
 
-# On destination
-sudo USE_LAZY_PAGES=true SOURCE_HOST=10.0.1.100 LAZY_PAGES_PORT=9002 ./auto_restore.sh
+# On destination (fetches pages FROM source)
+sudo USE_LAZY_PAGES=true SOURCE_HOST=10.0.1.50 LAZY_PAGES_PORT=9002 ./auto_restore.sh
 ```
 
 ## How It Works
