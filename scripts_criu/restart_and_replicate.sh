@@ -24,7 +24,7 @@ echo
 
 # Step 2: Start valkey-server with config
 echo "🚀 Starting valkey-server with $VALKEY_CONF..."
-valkey-server "$VALKEY_CONF" &
+sudo valkey-server "$VALKEY_CONF" &
 echo "✅ valkey-server started"
 echo
 
