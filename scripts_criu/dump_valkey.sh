@@ -74,44 +74,41 @@ run_phase () {
 }
 
 if [ "$USE_LAZY_PAGES" = "true" ]; then
-  # ============================================
-  # LAZY PAGES MODE
-  # ============================================
-  echo "📡 Lazy pages mode: Dump with integrated lazy-pages server"
+  echo "📡 Lazy pages mode: Dump + start lazy-pages server (source listens)"
   echo "   Pages will be served on-demand from memory (not written to disk)"
-  
-  # Dump with lazy-pages (CRIU automatically starts lazy-pages daemon)
+
   FINAL_LOG="$FINAL_DIR/dump.log"
-  run_phase "Dump (leave-running) with lazy-pages to $FINAL_DIR" \
+  run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \
     sudo criu dump \
       -t "$pid" \
       -D "$FINAL_DIR" \
       --leave-running \
       --lazy-pages \
-      --page-server \
-      --address 0.0.0.0 \
-      --port "$LAZY_PAGES_PORT" \
       --tcp-close \
       --ext-unix-sk \
       --ghost-limit 8M \
       -v4 -o "$FINAL_LOG"
-  
-  # Check if dump succeeded
-  if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null; then
+
+  if sudo grep -q "Dumping finished successfully" "$FINAL_LOG" || sudo grep -q "Notify success" "$FINAL_LOG"; then
     echo "✅ Dump completed successfully. Log: $FINAL_LOG"
-    echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" > /dev/null
+    echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" >/dev/null
+
     echo
-    echo "📡 Lazy-pages daemon is now running (started by CRIU)"
-    echo "   Ready to serve pages to destination on port $LAZY_PAGES_PORT"
-    echo
-    echo "📝 Destination command: sudo USE_LAZY_PAGES=true ./auto_restore.sh"
-    echo "   Note: Lazy-pages daemon will stop automatically after restore completes"
+    echo "🛰️ Starting lazy-pages server on source (listening on :$LAZY_PAGES_PORT)..."
+    # Start server in background; log separately
+    sudo nohup criu lazy-pages \
+      -D "$FINAL_DIR" \
+      --address 0.0.0.0 \
+      --port "$LAZY_PAGES_PORT" \
+      -v4 -o "$FINAL_DIR/lazy-pages.log" >/dev/null 2>&1 &
+    echo "✅ lazy-pages server started (pid $!). Logs: $FINAL_DIR/lazy-pages.log"
+    echo "➡️ Destination should restore with: --address $HOSTNAME_OR_IP_OF_SOURCE --port $LAZY_PAGES_PORT"
   else
-    echo "⚠️  Dump may have issues. See $FINAL_LOG"
-    sudo tail -n 40 "$FINAL_LOG" 2>/dev/null || true
+    echo "❌ Dump failed. See $FINAL_LOG"
+    sudo tail -n 60 "$FINAL_LOG" || true
     exit 1
   fi
-  
+fi  
 else
   # ============================================
   # TRADITIONAL MODE (FSx with pre-dumps)
