@@ -66,7 +66,7 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   
   # open lazy daemon
   sudo criu lazy-pages \
-  --images-dir "$RESTORE_DIR" \ 
+  -D "$RESTORE_DIR" \ 
   --page-server \
   --address  "$SOURCE_HOST" \
   --port "$LAZY_PAGES_PORT" &
