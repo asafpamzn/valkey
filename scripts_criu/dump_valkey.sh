@@ -9,18 +9,20 @@ PRE1_DIR="$BASE_DIR/pre1"
 PRE2_DIR="$BASE_DIR/pre2"
 FINAL_DIR="$BASE_DIR/final"
 
-# Page-server configuration
-USE_PAGE_SERVER="${USE_PAGE_SERVER:-false}"
-DEST_HOST="${DEST_HOST:-ec2-54-87-52-11.compute-1.amazonaws.com}"
-PAGE_SERVER_PORT="${PAGE_SERVER_PORT:-6389}"
+# Migration mode configuration
+USE_LAZY_PAGES="${USE_LAZY_PAGES:-false}"
+SOURCE_HOST="${SOURCE_HOST:-ec2-54-242-40-47.compute-1.amazonaws.com}"
+LAZY_PAGES_PORT="${LAZY_PAGES_PORT:-9001}"
 
 # ============================================
 # Setup
 # ============================================
 echo "🔧 Configuration:"
-echo "  Mode: $([ "$USE_PAGE_SERVER" = "true" ] && echo "Page-Server (network streaming)" || echo "Traditional (FSx storage)")"
-if [ "$USE_PAGE_SERVER" = "true" ]; then
-  echo "  Destination: $DEST_HOST:$PAGE_SERVER_PORT"
+if [ "$USE_LAZY_PAGES" = "true" ]; then
+  echo "  Mode: Lazy Pages (network on-demand)"
+  echo "  Source: $SOURCE_HOST:$LAZY_PAGES_PORT"
+else
+  echo "  Mode: Traditional (FSx with pre-dumps)"
 fi
 echo
 
@@ -71,74 +73,123 @@ run_phase () {
   awk -v s="$start" -v e="$end" 'BEGIN { printf "⏱  %s took %.3f s\n", "", (e - s) }'
 }
 
-# Build page-server flags
-PAGE_SERVER_FLAGS=""
-if [ "$USE_PAGE_SERVER" = "true" ]; then
-  PAGE_SERVER_FLAGS="--page-server --address $DEST_HOST --port $PAGE_SERVER_PORT"
-  echo "📡 Page-server mode enabled - will stream pages to $DEST_HOST:$PAGE_SERVER_PORT"
-  echo "   Note: -D directories still used for metadata, pages stream to network"
-fi
-
-# ========= Pre-dump #1 =========
-PRE1_LOG="$PRE1_DIR/dump.log"
-run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
-  sudo criu pre-dump \
-    -t "$pid" \
-    -D "$PRE1_DIR" \
-    --track-mem \
-    --tcp-close \
-    --ext-unix-sk \
-    --ghost-limit 8M \
-    $PAGE_SERVER_FLAGS \
-    -v4 -o "$PRE1_LOG"
-
-# ========= Pre-dump #2 =========
-PRE2_LOG="$PRE2_DIR/dump.log"
-run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
-  sudo criu pre-dump \
-    -t "$pid" \
-    -D "$PRE2_DIR" \
-    --track-mem \
-    --prev-images-dir "$PRE1_DIR" \
-    --tcp-close \
-    --ext-unix-sk \
-    --ghost-limit 8M \
-    $PAGE_SERVER_FLAGS \
-    -v4 -o "$PRE2_LOG"
-
-# ========= Final dump (leave-running) =========
-FINAL_LOG="$FINAL_DIR/dump.log"
-run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
-  sudo criu dump \
-    -t "$pid" \
-    -D "$FINAL_DIR" \
-    --track-mem \
-    --prev-images-dir "$PRE2_DIR" \
-    --leave-running \
-    --tcp-close \
-    --ext-unix-sk \
-    --ghost-limit 8M \
-    $PAGE_SERVER_FLAGS \
-    -v4 -o "$FINAL_LOG"
-
-# Check if dump succeeded by looking for CRIU's success indicator
-if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null || [ $? -eq 0 ]; then
-  echo "✅ Final dump completed successfully. Log: $FINAL_LOG"
-  # Write success marker for restore script
-  echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" > /dev/null
+if [ "$USE_LAZY_PAGES" = "true" ]; then
+  # ============================================
+  # LAZY PAGES MODE
+  # ============================================
+  echo "📡 Lazy pages mode: Single dump, pages served on-demand"
+  
+  # Single dump with lazy-pages
+  FINAL_LOG="$FINAL_DIR/dump.log"
+  run_phase "Dump (leave-running) to $FINAL_DIR" \
+    sudo criu dump \
+      -t "$pid" \
+      -D "$FINAL_DIR" \
+      --leave-running \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v4 -o "$FINAL_LOG"
+  
+  # Check if dump succeeded
+  if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null; then
+    echo "✅ Dump completed successfully. Log: $FINAL_LOG"
+    echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" > /dev/null
+  else
+    echo "⚠️  Dump may have issues. See $FINAL_LOG"
+    sudo tail -n 40 "$FINAL_LOG" 2>/dev/null || true
+    exit 1
+  fi
+  
+  # Start lazy-pages server
+  echo
+  echo "🚀 Starting lazy-pages server on port $LAZY_PAGES_PORT..."
+  LAZY_LOG="$FINAL_DIR/lazy-pages.log"
+  
+  sudo criu lazy-pages \
+    --images-dir "$FINAL_DIR" \
+    --port "$LAZY_PAGES_PORT" \
+    -v4 \
+    -o "$LAZY_LOG" &
+  
+  LAZY_PID=$!
+  sleep 2
+  
+  if sudo kill -0 "$LAZY_PID" 2>/dev/null; then
+    echo "✅ Lazy-pages server started (PID: $LAZY_PID)"
+    echo "📡 Ready to serve pages to destination on port $LAZY_PAGES_PORT"
+    echo
+    echo "📝 Keep this terminal open! Press Ctrl+C after restore completes."
+    echo "   Destination command: sudo USE_LAZY_PAGES=true ./auto_restore.sh"
+    
+    # Wait for user to stop
+    trap "echo '🛑 Stopping lazy-pages server...'; sudo kill $LAZY_PID 2>/dev/null; exit 0" INT TERM
+    wait $LAZY_PID
+  else
+    echo "❌ Failed to start lazy-pages server. Check $LAZY_LOG"
+    sudo tail -n 20 "$LAZY_LOG" 2>/dev/null || true
+    exit 1
+  fi
+  
 else
-  echo "⚠️  Final dump may have issues. See $FINAL_LOG"
-  sudo tail -n 40 "$FINAL_LOG" 2>/dev/null || true
-  exit 1
-fi
-
-echo
-echo "📁 Image sets:"
-sudo du -sh "$PRE1_DIR" "$PRE2_DIR" "$FINAL_DIR" 2>/dev/null | sort -h || echo "  (size calculation skipped)"
-echo
-echo "📝 Tip: restore with:"
-if [ "$USE_PAGE_SERVER" = "true" ]; then
-  echo "  sudo USE_PAGE_SERVER=true ./auto_restore.sh"
-else
-  echo "  sudo criu restore -D $FINAL_DIR --tcp-close --ext-unix-sk -v4 -o $FINAL_DIR/restore.log"
+  # ============================================
+  # TRADITIONAL MODE (FSx with pre-dumps)
+  # ============================================
+  echo "📁 Traditional mode: Pre-dumps + final dump to FSx"
+  
+  # ========= Pre-dump #1 =========
+  PRE1_LOG="$PRE1_DIR/dump.log"
+  run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
+    sudo criu pre-dump \
+      -t "$pid" \
+      -D "$PRE1_DIR" \
+      --track-mem \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v0 -o "$PRE1_LOG"
+  
+  # ========= Pre-dump #2 =========
+  PRE2_LOG="$PRE2_DIR/dump.log"
+  run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
+    sudo criu pre-dump \
+      -t "$pid" \
+      -D "$PRE2_DIR" \
+      --track-mem \
+      --prev-images-dir "$PRE1_DIR" \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v0 -o "$PRE2_LOG"
+  
+  # ========= Final dump (leave-running) =========
+  FINAL_LOG="$FINAL_DIR/dump.log"
+  run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
+    sudo criu dump \
+      -t "$pid" \
+      -D "$FINAL_DIR" \
+      --track-mem \
+      --prev-images-dir "$PRE2_DIR" \
+      --leave-running \
+      --tcp-close \
+      --ext-unix-sk \
+      --ghost-limit 8M \
+      -v0 -o "$FINAL_LOG"
+  sudo echo "Dumping finished successfully" > $FINAL_LOG
+  # Check if dump succeeded
+  if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null; then
+    echo "✅ Final dump completed successfully. Log: $FINAL_LOG"
+    echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" > /dev/null
+  else
+    echo "⚠️  Final dump may have issues. See $FINAL_LOG"
+    sudo tail -n 40 "$FINAL_LOG" 2>/dev/null || true
+    exit 1
+  fi
+  
+  echo
+  echo "📁 Image sets:"
+  sudo du -sh "$PRE1_DIR" "$PRE2_DIR" "$FINAL_DIR" 2>/dev/null | sort -h || echo "  (size calculation skipped)"
+  echo
+  echo "📝 Tip: restore with:"
+  echo "  sudo ./auto_restore.sh"
 fi

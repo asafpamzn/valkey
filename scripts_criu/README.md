@@ -4,17 +4,17 @@ These scripts enable live migration of Valkey server between EC2 instances using
 
 ## Overview
 
-The scripts support two modes:
+The scripts support two migration modes:
 
-1. **Traditional Mode**: Dumps to shared FSx storage (~1 second freeze time)
-2. **Page-Server Mode**: Streams memory over network (~50-200ms freeze time) ⚡
+1. **Traditional Mode** (default): Pre-dumps + final dump to shared FSx storage
+2. **Lazy Pages Mode**: Single dump + on-demand page fetching over network
 
 ## Architecture
 
 - **Source EC2**: `ec2-54-242-40-47.compute-1.amazonaws.com` (runs `dump_valkey.sh`)
 - **Destination EC2**: `ec2-54-87-52-11.compute-1.amazonaws.com` (runs `auto_restore.sh`)
 - **Shared Storage**: `/fsx/checkpoint1/` (FSx for Lustre)
-- **Page-Server Port**: `6389`
+- **Lazy Pages Port**: `9001`
 
 ## Quick Start
 
@@ -22,131 +22,139 @@ The scripts support two modes:
 
 **On Destination EC2:**
 ```bash
-cd /Users/asafp/work/valkey/scripts_criu
-./auto_restore.sh
+cd /path/to/valkey/scripts_criu
+sudo ./auto_restore.sh
 ```
 
 **On Source EC2:**
 ```bash
-cd /Users/asafp/work/valkey/scripts_criu
-./dump_valkey.sh
+cd /path/to/valkey/scripts_criu
+sudo ./dump_valkey.sh
 ```
 
-### Page-Server Mode (Recommended for Low Latency)
+### Lazy Pages Mode (Recommended for Fastest Startup)
 
-**On Destination EC2 (start first):**
+**On Source EC2 (start first):**
 ```bash
-cd /Users/asafp/work/valkey/scripts_criu
-USE_PAGE_SERVER=true ./auto_restore.sh
+cd /path/to/valkey/scripts_criu
+sudo USE_LAZY_PAGES=true ./dump_valkey.sh
+# Keep this terminal open - lazy-pages server will run here
 ```
 
-**On Source EC2 (start after destination is ready):**
+**On Destination EC2:**
 ```bash
-cd /Users/asafp/work/valkey/scripts_criu
-sudo USE_PAGE_SERVER=true ./dump_valkey.sh
+cd /path/to/valkey/scripts_criu
+sudo USE_LAZY_PAGES=true ./auto_restore.sh
+# Press Enter when prompted (after source is ready)
 ```
-```
+
+**After restore completes:**
+- Stop the source lazy-pages server with Ctrl+C
+- Valkey is now running on destination
 
 ## Configuration
 
 ### Environment Variables
 
-Both scripts support these environment variables:
-
 #### dump_valkey.sh
-- `USE_PAGE_SERVER`: Enable page-server mode (`true`/`false`, default: `false`)
-- `DEST_HOST`: Destination hostname (default: `ec2-54-87-52-11.compute-1.amazonaws.com`)
-- `PAGE_SERVER_PORT`: Port for page-server (default: `6389`)
+- `USE_LAZY_PAGES`: Enable lazy pages mode (`true`/`false`, default: `false`)
+- `SOURCE_HOST`: Source hostname for lazy pages (default: `ec2-54-242-40-47.compute-1.amazonaws.com`)
+- `LAZY_PAGES_PORT`: Port for lazy-pages server (default: `9001`)
 
 #### auto_restore.sh
-- `USE_PAGE_SERVER`: Enable page-server mode (`true`/`false`, default: `false`)
-- `PAGE_SERVER_PORT`: Port to listen on (default: `6389`)
+- `USE_LAZY_PAGES`: Enable lazy pages mode (`true`/`false`, default: `false`)
+- `SOURCE_HOST`: Source hostname to fetch pages from (default: `ec2-54-242-40-47.compute-1.amazonaws.com`)
+- `LAZY_PAGES_PORT`: Port to connect to (default: `9001`)
 
 ### Example with Custom Configuration
 
 ```bash
-# On destination
-USE_PAGE_SERVER=true PAGE_SERVER_PORT=7000 ./auto_restore.sh
-
 # On source
-USE_PAGE_SERVER=true DEST_HOST=10.0.1.100 PAGE_SERVER_PORT=7000 ./dump_valkey.sh
+sudo USE_LAZY_PAGES=true SOURCE_HOST=10.0.1.100 LAZY_PAGES_PORT=9002 ./dump_valkey.sh
+
+# On destination
+sudo USE_LAZY_PAGES=true SOURCE_HOST=10.0.1.100 LAZY_PAGES_PORT=9002 ./auto_restore.sh
 ```
 
 ## How It Works
 
 ### Traditional Mode
 
-1. Source dumps memory to `/fsx/checkpoint1/pre1/`, `/fsx/checkpoint1/pre2/`, `/fsx/checkpoint1/final/`
-2. Destination watches for completion marker in log file
-3. Destination restores from `/fsx/checkpoint1/final/`
+1. Source performs two pre-dumps to `/fsx/checkpoint1/pre1/` and `/fsx/checkpoint1/pre2/`
+2. Source performs final dump to `/fsx/checkpoint1/final/`
+3. Destination watches for completion marker in log file
+4. Destination restores from `/fsx/checkpoint1/final/`
 
 **Pros:**
-- Simple setup
+- Simple, reliable
 - No network configuration needed
+- Well-tested approach
 
 **Cons:**
-- Slower (~1 second freeze time)
-- High I/O on shared storage
+- High I/O load on FSx
+- Slower freeze time (~1-2 seconds)
 
-### Page-Server Mode
+### Lazy Pages Mode
 
-1. Destination starts CRIU page-server listening on port 6389
-2. Source connects and **streams memory pages directly over network** during pre-dumps (no FSx writes)
-3. Final dump writes only metadata and small delta to `/fsx/checkpoint1/final/`
-4. Destination stops page-server and restores from received pages + final metadata
+1. Source performs single dump to `/fsx/checkpoint1/final/`
+2. Source starts lazy-pages server on port 9001
+3. Destination restores with `--lazy-pages` flag
+4. Destination starts immediately, fetches pages on-demand from source
+5. Pages transferred over network as needed
 
 **Pros:**
-- Much faster (~50-200ms freeze time) ⚡
-- **Dramatically reduced I/O on shared storage** (only final metadata written to FSx)
-- Memory pages transferred over network instead of through FSx
-- Better for live migration
+- **Fastest startup** (~100-200ms) ⚡
+- Minimal FSx I/O (only metadata)
+- True live migration experience
+- Pages fetched on-demand over fast network
 
 **Cons:**
-- Requires network connectivity on port 6389
-- Slightly more complex setup
+- Requires network connectivity on port 9001
+- Source must keep lazy-pages server running until pages are loaded
+- Slightly more complex coordination
 
 ## Network Requirements
 
-For page-server mode, ensure:
+For lazy pages mode, ensure:
 
-1. **Security Group Rules**: Allow TCP port 6389 from source to destination
-2. **Network Connectivity**: Source can reach destination on port 6389
-3. **Firewall**: No firewall blocking port 6389
+1. **Security Group Rules**: Allow TCP port 9001 from destination to source
+2. **Network Connectivity**: Destination can reach source on port 9001
+3. **Firewall**: No firewall blocking port 9001
 
 Test connectivity:
 ```bash
-# On source EC2
-nc -zv ec2-54-87-52-11.compute-1.amazonaws.com 6389
+# On destination EC2
+nc -zv ec2-54-242-40-47.compute-1.amazonaws.com 9001
 ```
 
 ## Performance Comparison
 
-| Mode | Freeze Time | FSx I/O | Network | Memory Transfer | Best For |
-|------|-------------|---------|---------|-----------------|----------|
-| Traditional | ~1 second | High (all dumps to FSx) | Low | Via FSx | Testing, simple setups |
-| Page-Server | ~50-200ms | Minimal (only final metadata) | Medium | Direct network streaming | Production, live migration |
+| Mode | Freeze Time | Startup Time | FSx I/O | Network | Best For |
+|------|-------------|--------------|---------|---------|----------|
+| Traditional | ~1-2 seconds | N/A | High (all dumps) | Low | Testing, simple setups |
+| Lazy Pages | ~1-2 seconds | ~100-200ms | Minimal (metadata only) | Medium | Production, live migration |
 
-**Key Difference**: In page-server mode, pre-dumps stream memory pages directly over the network to the destination, bypassing FSx entirely. Only the final dump writes minimal metadata to FSx.
+**Key Difference**: Lazy pages mode allows destination to start serving requests almost immediately while fetching memory pages in the background.
 
 ## Troubleshooting
 
-### Page-Server Mode Issues
+### Lazy Pages Mode Issues
 
-**Problem**: "Connection refused" on source
+**Problem**: "Can't connect to lazy-pages server"
 ```bash
-# Check if page-server is running on destination
-sudo netstat -tlnp | grep 6389
+# Check if lazy-pages server is running on source
+sudo netstat -tlnp | grep 9001
 
-# Check page-server logs
-sudo tail -f /fsx/checkpoint1/page-server.log
+# Check lazy-pages logs
+sudo tail -f /fsx/checkpoint1/final/lazy-pages.log
 ```
 
-**Problem**: High freeze time even with page-server
+**Problem**: Slow page fetching
 - Check network latency between instances
-- Verify memory change rate (high churn = longer freeze)
-- Consider reducing to single pre-dump
+- Verify network bandwidth is sufficient
+- Consider using enhanced networking on EC2 instances
 
-### General Issues
+### Traditional Mode Issues
 
 **Problem**: "valkey-server not found"
 ```bash
@@ -171,15 +179,25 @@ sudo chmod -R 755 /fsx/checkpoint1/
 
 ## Logs
 
+### Traditional Mode
 - Dump logs: `/fsx/checkpoint1/{pre1,pre2,final}/dump.log`
 - Restore log: `/fsx/checkpoint1/final/restore.log`
-- Page-server log: `/fsx/checkpoint1/page-server.log` (page-server mode only)
+
+### Lazy Pages Mode
+- Dump log: `/fsx/checkpoint1/final/dump.log`
+- Lazy-pages log: `/fsx/checkpoint1/final/lazy-pages.log`
+- Restore log: `/fsx/checkpoint1/final/restore.log`
 
 ## Advanced Usage
 
-### Single Pre-dump (Faster)
+### Verbosity
 
-For even faster checkpoints, modify `dump_valkey.sh` to use only one pre-dump instead of two. This reduces total time but may increase final freeze time slightly.
+Scripts use `-v4` (verbose) for debugging. For production, you can modify to `-v0` (silent):
+```bash
+# In dump_valkey.sh and auto_restore.sh, change:
+-v4  # to:
+-v0
+```
 
 ### Custom Ghost Limit
 
@@ -187,27 +205,47 @@ The scripts use `--ghost-limit 8M`. Adjust if needed:
 - Lower (4M): Faster scanning, more files
 - Higher (16M): Slower scanning, fewer files
 
-### Verbosity
-
-Scripts use `-v0` (silent) for maximum performance. For debugging, change to `-v4`:
-```bash
-# In dump_valkey.sh and auto_restore.sh, change:
--v0  # to:
--v4
-```
-
 ## Best Practices
 
-1. **Always start destination first** when using page-server mode
-2. **Test network connectivity** before production migration
-3. **Monitor freeze time** and adjust pre-dump frequency if needed
-4. **Use page-server mode** for production live migrations
-5. **Keep logs** for troubleshooting
+1. **Use lazy pages mode** for production live migrations
+2. **Test network connectivity** before migration (especially for lazy pages)
+3. **Monitor freeze time** and adjust approach if needed
+4. **Keep logs** for troubleshooting
+5. **Ensure sufficient network bandwidth** for lazy pages mode
+
+## Workflow Examples
+
+### Traditional Mode Workflow
+```bash
+# Terminal 1 (Destination)
+sudo ./auto_restore.sh
+
+# Terminal 2 (Source)
+sudo ./dump_valkey.sh
+
+# Result: Valkey migrated via FSx
+```
+
+### Lazy Pages Mode Workflow
+```bash
+# Terminal 1 (Source) - Start first, keep open
+sudo USE_LAZY_PAGES=true ./dump_valkey.sh
+# Wait for "Ready to serve pages" message
+
+# Terminal 2 (Destination)
+sudo USE_LAZY_PAGES=true ./auto_restore.sh
+# Press Enter when prompted
+# Valkey starts immediately!
+
+# Terminal 1 (Source) - After restore completes
+# Press Ctrl+C to stop lazy-pages server
+```
 
 ## Support
 
 For issues or questions:
 1. Check logs in `/fsx/checkpoint1/`
-2. Verify network connectivity (page-server mode)
+2. Verify network connectivity (lazy pages mode)
 3. Ensure Valkey is running before checkpoint
 4. Check CRIU version: `criu --version` (requires 3.15+)
+5. Verify lazy-pages support: `criu check --feature lazy_pages`
