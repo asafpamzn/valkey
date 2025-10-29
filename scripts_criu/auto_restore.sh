@@ -7,6 +7,7 @@ set -euo pipefail
 LOG_FILE="/fsx/checkpoint1/final/dump.log"
 RESTORE_DIR="/fsx/checkpoint1/final"
 SUCCESS_MSG="Dumping finished successfully"
+SUCCESS_MSG_LAZY="Starting page server on port 9001"
 REPLICA_HOST="ec2-54-242-40-47.compute-1.amazonaws.com"
 REPLICA_PORT=6379
 
@@ -50,16 +51,16 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   read -p "Press Enter when source is ready..."
   
   # Wait for dump completion marker
-  echo "📡 Watching $LOG_FILE for completion message..."
-  while [[ ! -f "$LOG_FILE" ]]; do
-    printf "."
-    sleep 0.1
-  done
+  #echo "📡 Watching $LOG_FILE for completion message..."
+  #while [[ ! -f "$LOG_FILE" ]]; do
+  #  printf "."
+  #  sleep 0.1
+  #done
   
-  while ! sudo grep -q "$SUCCESS_MSG" "$LOG_FILE" 2>/dev/null; do
-    printf "."
-    sleep 0.1
-  done
+  #while ! sudo grep -q "$SUCCESS_MSG_LAZY" "$LOG_FILE" 2>/dev/null; do
+  #  printf "."
+  #  sleep 0.1
+  #done
   
   echo "✅ Dump completed — starting lazy restore..."
   
