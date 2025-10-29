@@ -17,6 +17,7 @@ echo "🔄 Restarting Valkey and configuring replication..."
 echo
 
 # Step 1: Kill valkey-server (SIGKILL)
+sudo rm /var/lib/valkey/dump.rdb
 echo "🔪 Killing valkey-server..."
 pkill -9 valkey-server || true
 echo "✅ valkey-server killed"
