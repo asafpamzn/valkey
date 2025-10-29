@@ -77,15 +77,20 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   # ============================================
   # LAZY PAGES MODE
   # ============================================
-  echo "📡 Lazy pages mode: Single dump, pages served on-demand"
+  echo "📡 Lazy pages mode: Dump with integrated lazy-pages server"
+  echo "   Pages will be served on-demand from memory (not written to disk)"
   
-  # Single dump with lazy-pages
+  # Dump with lazy-pages (CRIU automatically starts lazy-pages daemon)
   FINAL_LOG="$FINAL_DIR/dump.log"
-  run_phase "Dump (leave-running) to $FINAL_DIR" \
+  run_phase "Dump (leave-running) with lazy-pages to $FINAL_DIR" \
     sudo criu dump \
       -t "$pid" \
       -D "$FINAL_DIR" \
       --leave-running \
+      --lazy-pages \
+      --page-server \
+      --address "$SOURCE_HOST" \
+      --port "$LAZY_PAGES_PORT" \
       --tcp-close \
       --ext-unix-sk \
       --ghost-limit 8M \
@@ -95,39 +100,15 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null; then
     echo "✅ Dump completed successfully. Log: $FINAL_LOG"
     echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" > /dev/null
+    echo
+    echo "📡 Lazy-pages daemon is now running (started by CRIU)"
+    echo "   Ready to serve pages to destination on port $LAZY_PAGES_PORT"
+    echo
+    echo "📝 Destination command: sudo USE_LAZY_PAGES=true ./auto_restore.sh"
+    echo "   Note: Lazy-pages daemon will stop automatically after restore completes"
   else
     echo "⚠️  Dump may have issues. See $FINAL_LOG"
     sudo tail -n 40 "$FINAL_LOG" 2>/dev/null || true
-    exit 1
-  fi
-  
-  # Start lazy-pages server
-  echo
-  echo "🚀 Starting lazy-pages server on port $LAZY_PAGES_PORT..."
-  LAZY_LOG="$FINAL_DIR/lazy-pages.log"
-  
-  sudo criu lazy-pages \
-    --images-dir "$FINAL_DIR" \
-    --port "$LAZY_PAGES_PORT" \
-    -v4 \
-    -o "$LAZY_LOG" &
-  
-  LAZY_PID=$!
-  sleep 2
-  
-  if sudo kill -0 "$LAZY_PID" 2>/dev/null; then
-    echo "✅ Lazy-pages server started (PID: $LAZY_PID)"
-    echo "📡 Ready to serve pages to destination on port $LAZY_PAGES_PORT"
-    echo
-    echo "📝 Keep this terminal open! Press Ctrl+C after restore completes."
-    echo "   Destination command: sudo USE_LAZY_PAGES=true ./auto_restore.sh"
-    
-    # Wait for user to stop
-    trap "echo '🛑 Stopping lazy-pages server...'; sudo kill $LAZY_PID 2>/dev/null; exit 0" INT TERM
-    wait $LAZY_PID
-  else
-    echo "❌ Failed to start lazy-pages server. Check $LAZY_LOG"
-    sudo tail -n 20 "$LAZY_LOG" 2>/dev/null || true
     exit 1
   fi
   
