@@ -26,7 +26,19 @@ echo
 # Step 2: Start valkey-server with config
 echo "🚀 Starting valkey-server with $VALKEY_CONF..."
 sudo valkey-server "$VALKEY_CONF" &
-echo "✅ valkey-server started"
+
+# Wait and verify it started
+sleep 0.5
+if ! pgrep -x valkey-server > /dev/null; then
+  echo "⚠️  First start attempt failed, retrying..."
+  sudo valkey-server "$VALKEY_CONF" &
+  sleep 0.5
+  if ! pgrep -x valkey-server > /dev/null; then
+    echo "❌ Failed to start valkey-server after retry"
+    exit 1
+  fi
+fi
+echo "✅ valkey-server started and verified running"
 echo
 
 # Step 3: Configure replication
