@@ -89,7 +89,6 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
       --leave-running \
       --lazy-pages \
       --page-server \
-      --address "$DEST_HOST" \
       --port "$LAZY_PAGES_PORT" \
       --tcp-close \
       --ext-unix-sk \
