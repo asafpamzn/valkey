@@ -79,7 +79,7 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   echo "   Pages will be served on-demand from memory (not written to disk)"
 
   FINAL_LOG="$FINAL_DIR/dump.log"
-  run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \    
+run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \
     sudo criu dump \
       --tree "$pid" \
       --images-dir  "$FINAL_DIR" \
