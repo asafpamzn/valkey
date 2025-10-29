@@ -39,13 +39,35 @@ ps -p "$pid" -o pid,cmd,etime
 # Helper to run a CRIU phase and time it
 run_phase () {
   local desc="$1"; shift
+  local log_file=""
+  
+  # Extract log file from arguments for error reporting
+  for arg in "$@"; do
+    if [[ "$arg" == *.log ]]; then
+      log_file="$arg"
+      break
+    fi
+  done
+  
   echo
   echo "🧊 ${desc}..."
-  local start end
+  echo "   Command: $*"
+  local start end exit_code
   start=$(date +%s.%N)
   # shellcheck disable=SC2068
-  "$@" || { echo "❌ ${desc} failed"; exit 1; }
+  "$@"
+  exit_code=$?
   end=$(date +%s.%N)
+  
+  if [ $exit_code -ne 0 ]; then
+    echo "❌ ${desc} failed (exit code: $exit_code)"
+    if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+      echo "📋 Last 30 lines of log file:"
+      sudo tail -n 30 "$log_file" 2>/dev/null || echo "   (could not read log)"
+    fi
+    exit 1
+  fi
+  
   awk -v s="$start" -v e="$end" 'BEGIN { printf "⏱  %s took %.3f s\n", "", (e - s) }'
 }
 
@@ -78,7 +100,7 @@ if [ "$USE_PAGE_SERVER" = "true" ]; then
       --ext-unix-sk \
       --ghost-limit 8M \
       $PAGE_SERVER_FLAGS \
-      -v0 -o "$PRE1_LOG"
+      -v4 -o "$PRE1_LOG"
 else
   run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
     sudo criu pre-dump \
@@ -102,7 +124,7 @@ if [ "$USE_PAGE_SERVER" = "true" ]; then
       --ext-unix-sk \
       --ghost-limit 8M \
       $PAGE_SERVER_FLAGS \
-      -v0 -o "$PRE2_LOG"
+      -v4 -o "$PRE2_LOG"
 else
   run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
     sudo criu pre-dump \
@@ -129,7 +151,7 @@ if [ "$USE_PAGE_SERVER" = "true" ]; then
       --ext-unix-sk \
       --ghost-limit 8M \
       $PAGE_SERVER_FLAGS \
-      -v0 -o "$FINAL_LOG"
+      -v4 -o "$FINAL_LOG"
 else
   run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
     sudo criu dump \
