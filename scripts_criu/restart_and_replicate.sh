@@ -27,18 +27,18 @@ echo
 echo "🚀 Starting valkey-server with $VALKEY_CONF..."
 sudo valkey-server "$VALKEY_CONF" &
 
-# Wait and verify it started
+# Wait and verify it started by checking if it responds to PING
 sleep 0.5
-if ! pgrep -x valkey-server > /dev/null; then
-  echo "⚠️  First start attempt failed, retrying..."
+if ! valkey-cli ping &>/dev/null; then
+  echo "⚠️  First start attempt failed (no PING response), retrying..."
   sudo valkey-server "$VALKEY_CONF" &
   sleep 0.5
-  if ! pgrep -x valkey-server > /dev/null; then
-    echo "❌ Failed to start valkey-server after retry"
+  if ! valkey-cli ping &>/dev/null; then
+    echo "❌ Failed to start valkey-server after retry (no PING response)"
     exit 1
   fi
 fi
-echo "✅ valkey-server started and verified running"
+echo "✅ valkey-server started and verified responding to PING"
 echo
 
 # Step 3: Configure replication
