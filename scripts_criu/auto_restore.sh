@@ -1,11 +1,29 @@
 #!/bin/bash
 set -euo pipefail
 
+# ============================================
+# Configuration
+# ============================================
 LOG_FILE="/fsx/checkpoint1/final/dump.log"
 RESTORE_DIR="/fsx/checkpoint1/final"
 SUCCESS_MSG="Dumping finished successfully"
 REPLICA_HOST="ec2-54-242-40-47.compute-1.amazonaws.com"
 REPLICA_PORT=6379
+
+# Page-server configuration
+USE_PAGE_SERVER="${USE_PAGE_SERVER:-false}"
+PAGE_SERVER_PORT="${PAGE_SERVER_PORT:-6389}"
+BASE_DIR="/fsx/checkpoint1"
+
+# ============================================
+# Setup
+# ============================================
+echo "🔧 Configuration:"
+echo "  Mode: $([ "$USE_PAGE_SERVER" = "true" ] && echo "Page-Server (network streaming)" || echo "Traditional (FSx storage)")"
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  echo "  Listening on port: $PAGE_SERVER_PORT"
+fi
+echo
 
 # Ensure necessary directories and files exist BEFORE waiting for dump
 echo "📁 Preparing restore environment..."
@@ -20,6 +38,52 @@ sudo touch /var/log/valkey/stdout.log /var/log/valkey/stderr.log
 sudo chown ubuntu:ubuntu /var/log/valkey/stdout.log /var/log/valkey/stderr.log
 sudo chmod 660 /var/log/valkey/stdout.log /var/log/valkey/stderr.log
 
+# ============================================
+# Start Page-Server if enabled
+# ============================================
+PAGE_SERVER_PID=""
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  echo "🚀 Starting CRIU page-server on port $PAGE_SERVER_PORT..."
+  
+  # Ensure base directories exist
+  sudo mkdir -p "$BASE_DIR/pre1" "$BASE_DIR/pre2" "$BASE_DIR/final"
+  
+  # Start page-server in background
+  sudo criu page-server \
+    --images-dir "$BASE_DIR" \
+    --port "$PAGE_SERVER_PORT" \
+    -v0 \
+    -o "$BASE_DIR/page-server.log" &
+  
+  PAGE_SERVER_PID=$!
+  
+  # Wait a moment for page-server to start
+  sleep 2
+  
+  # Verify page-server is running
+  if sudo kill -0 "$PAGE_SERVER_PID" 2>/dev/null; then
+    echo "✅ Page-server started successfully (PID: $PAGE_SERVER_PID)"
+    echo "📡 Ready to receive memory pages from source..."
+  else
+    echo "❌ Failed to start page-server. Check $BASE_DIR/page-server.log"
+    sudo tail -n 20 "$BASE_DIR/page-server.log" 2>/dev/null || true
+    exit 1
+  fi
+  
+  # Cleanup function to stop page-server on exit
+  cleanup_page_server() {
+    if [ -n "$PAGE_SERVER_PID" ] && sudo kill -0 "$PAGE_SERVER_PID" 2>/dev/null; then
+      echo "🛑 Stopping page-server (PID: $PAGE_SERVER_PID)..."
+      sudo kill "$PAGE_SERVER_PID" 2>/dev/null || true
+      sleep 1
+    fi
+  }
+  trap cleanup_page_server EXIT
+fi
+
+# ============================================
+# Wait for Dump Completion
+# ============================================
 echo "📡 Watching $LOG_FILE for completion message..."
 echo "Trigger condition: '$SUCCESS_MSG'"
 
@@ -34,7 +98,16 @@ while true; do
   if sudo grep -q "$SUCCESS_MSG" "$LOG_FILE"; then
     echo
     echo "✅ Dump completed successfully — starting restore..."
-
+    
+    # Stop page-server if it was running
+    if [ "$USE_PAGE_SERVER" = "true" ] && [ -n "$PAGE_SERVER_PID" ]; then
+      echo "🛑 Stopping page-server before restore..."
+      sudo kill "$PAGE_SERVER_PID" 2>/dev/null || true
+      sleep 1
+      PAGE_SERVER_PID=""  # Clear PID so cleanup doesn't try again
+    fi
+    
+    # Perform restore
     sudo criu restore \
       -D "$RESTORE_DIR" \
       --tcp-close \

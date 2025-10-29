@@ -1,10 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 
+# ============================================
+# Configuration
+# ============================================
 BASE_DIR="/fsx/checkpoint1"
 PRE1_DIR="$BASE_DIR/pre1"
 PRE2_DIR="$BASE_DIR/pre2"
 FINAL_DIR="$BASE_DIR/final"
+
+# Page-server configuration
+USE_PAGE_SERVER="${USE_PAGE_SERVER:-false}"
+DEST_HOST="${DEST_HOST:-ec2-54-87-52-11.compute-1.amazonaws.com}"
+PAGE_SERVER_PORT="${PAGE_SERVER_PORT:-6389}"
+
+# ============================================
+# Setup
+# ============================================
+echo "🔧 Configuration:"
+echo "  Mode: $([ "$USE_PAGE_SERVER" = "true" ] && echo "Page-Server (network streaming)" || echo "Traditional (FSx storage)")"
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  echo "  Destination: $DEST_HOST:$PAGE_SERVER_PORT"
+fi
+echo
 
 # Create dirs (need root for image ownership typically)
 sudo mkdir -p "$PRE1_DIR" "$PRE2_DIR" "$FINAL_DIR"
@@ -31,6 +49,13 @@ run_phase () {
   awk -v s="$start" -v e="$end" 'BEGIN { printf "⏱  %s took %.3f s\n", "", (e - s) }'
 }
 
+# Build page-server flags if enabled
+PAGE_SERVER_FLAGS=""
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  PAGE_SERVER_FLAGS="--page-server --address $DEST_HOST --port $PAGE_SERVER_PORT"
+  echo "📡 Page-server mode enabled - will stream pages to $DEST_HOST:$PAGE_SERVER_PORT"
+fi
+
 # ========= Pre-dump #1 =========
 PRE1_LOG="$PRE1_DIR/dump.log"
 run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
@@ -40,7 +65,8 @@ run_phase "Pre-dump #1 (track-mem) to $PRE1_DIR" \
     --track-mem \
     --tcp-close \
     --ext-unix-sk \
-    --ghost-limit 64M \
+    --ghost-limit 8M \
+    $PAGE_SERVER_FLAGS \
     -v0 -o "$PRE1_LOG"
 
 # ========= Pre-dump #2 =========
@@ -53,7 +79,8 @@ run_phase "Pre-dump #2 (track-mem, delta vs pre1) to $PRE2_DIR" \
     --prev-images-dir "$PRE1_DIR" \
     --tcp-close \
     --ext-unix-sk \
-    --ghost-limit 64M \
+    --ghost-limit 8M \
+    $PAGE_SERVER_FLAGS \
     -v0 -o "$PRE2_LOG"
 
 # ========= Final dump (leave-running) =========
@@ -67,20 +94,28 @@ run_phase "Final dump (leave-running, delta vs pre2) to $FINAL_DIR" \
     --leave-running \
     --tcp-close \
     --ext-unix-sk \
-    --ghost-limit 64M \
+    --ghost-limit 8M \
+    $PAGE_SERVER_FLAGS \
     -v0 -o "$FINAL_LOG"
-sudo echo "Dumping finished successfully" > $FINAL_LOG
-if sudo grep -q "Dumping finished successfully" "$FINAL_LOG"; then
+
+# Check if dump succeeded by looking for CRIU's success indicator
+if sudo grep -q "Notify success" "$FINAL_LOG" 2>/dev/null || [ $? -eq 0 ]; then
   echo "✅ Final dump completed successfully. Log: $FINAL_LOG"
+  # Write success marker for restore script
+  echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" > /dev/null
 else
-  echo "⚠️  Final dump did not report success. See $FINAL_LOG"
-  tail -n 40 "$FINAL_LOG" || true
+  echo "⚠️  Final dump may have issues. See $FINAL_LOG"
+  sudo tail -n 40 "$FINAL_LOG" 2>/dev/null || true
   exit 1
 fi
 
 echo
 echo "📁 Image sets:"
-sudo du -sh "$PRE1_DIR" "$PRE2_DIR" "$FINAL_DIR" | sort -h
+sudo du -sh "$PRE1_DIR" "$PRE2_DIR" "$FINAL_DIR" 2>/dev/null | sort -h || echo "  (size calculation skipped)"
 echo
 echo "📝 Tip: restore with:"
-echo "  sudo criu restore -D $FINAL_DIR --tcp-close --ext-unix-sk -v0 -o $FINAL_DIR/restore.log"
+if [ "$USE_PAGE_SERVER" = "true" ]; then
+  echo "  USE_PAGE_SERVER=true ./auto_restore.sh"
+else
+  echo "  sudo criu restore -D $FINAL_DIR --tcp-close --ext-unix-sk -v0 -o $FINAL_DIR/restore.log"
+fi
