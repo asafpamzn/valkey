@@ -64,14 +64,19 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
   echo
   echo "✅ Dump completed — starting lazy restore..."
   
-  # Perform lazy restore
+  # open lazy daemon
+  sudo criu lazy-pages \
+  --images-dir <"$RESTORE_DIR" \ 
+  --page-server \
+  --address  "$SOURCE_HOST" \
+  --port "$LAZY_PAGES_PORT" &
+  
+  # The restore should be run with --lazy-pages option
   sudo criu restore \
-    -D "$RESTORE_DIR" \
+     --images-dir <"$RESTORE_DIR" \ 
     --tcp-close \
     --ext-unix-sk \
     --lazy-pages \
-    --address "$SOURCE_HOST" \
-    --port "$LAZY_PAGES_PORT" \
     -v4 \
     -o "$RESTORE_DIR/restore.log"
   

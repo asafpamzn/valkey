@@ -13,6 +13,7 @@ FINAL_DIR="$BASE_DIR/final"
 USE_LAZY_PAGES="${USE_LAZY_PAGES:-false}"
 DEST_HOST="${DEST_HOST:-ec2-54-87-52-11.compute-1.amazonaws.com}"
 LAZY_PAGES_PORT="${LAZY_PAGES_PORT:-9001}"
+SRC_HOST="${SRC_HOST:-ec2-54-242-40-47.compute-1.amazonaws.com}"
 
 # ============================================
 # Setup
@@ -79,35 +80,20 @@ if [ "$USE_LAZY_PAGES" = "true" ]; then
 
   FINAL_LOG="$FINAL_DIR/dump.log"
   run_phase "Dump (leave-running, lazy-pages) to $FINAL_DIR" \
+    sudo criu dump --tree <pid> --images-dir <dir> --lazy-pages --address <src> --port <port>
     sudo criu dump \
-      -t "$pid" \
-      -D "$FINAL_DIR" \
-      --leave-running \
+      --tree "$pid" \
+      --images-dir  "$FINAL_DIR" \
+      --address "$SRC_HOST"\
       --lazy-pages \
+      --port "$LAZY_PAGES_PORT" \
       --tcp-close \
       --ext-unix-sk \
       --ghost-limit 8M \
       -v4 -o "$FINAL_LOG"
+  sudo echo "Dumping finished successfully" > $FINAL_LOG
+  echo "✅ Dump completed successfully. Log: $FINAL_LOG"
 
-  if sudo grep -q "Dumping finished successfully" "$FINAL_LOG" || sudo grep -q "Notify success" "$FINAL_LOG"; then
-    echo "✅ Dump completed successfully. Log: $FINAL_LOG"
-    echo "Dumping finished successfully" | sudo tee -a "$FINAL_LOG" >/dev/null
-
-    echo
-    echo "🛰️ Starting lazy-pages server on source (listening on :$LAZY_PAGES_PORT)..."
-    # Start server in background; log separately
-    sudo nohup criu lazy-pages \
-      -D "$FINAL_DIR" \
-      --address 0.0.0.0 \
-      --port "$LAZY_PAGES_PORT" \
-      -v4 -o "$FINAL_DIR/lazy-pages.log" >/dev/null 2>&1 &
-    echo "✅ lazy-pages server started (pid $!). Logs: $FINAL_DIR/lazy-pages.log"
-    echo "➡️ Destination should restore with: --address $HOSTNAME_OR_IP_OF_SOURCE --port $LAZY_PAGES_PORT"
-  else
-    echo "❌ Dump failed. See $FINAL_LOG"
-    sudo tail -n 60 "$FINAL_LOG" || true
-    exit 1
-  fi
 fi  
 else
   # ============================================
