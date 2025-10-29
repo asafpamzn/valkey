@@ -11,9 +11,9 @@ FINAL_DIR="$BASE_DIR/final"
 
 # Migration mode configuration
 USE_LAZY_PAGES="${USE_LAZY_PAGES:-false}"
-DEST_HOST="${DEST_HOST:-ec2-54-87-52-11.compute-1.amazonaws.com}"
+DEST_HOST="${DEST_HOST:-54.87.52.11}"
 LAZY_PAGES_PORT="${LAZY_PAGES_PORT:-9001}"
-SRC_HOST="${SRC_HOST:-ec2-54-242-40-47.compute-1.amazonaws.com}"
+SRC_HOST="${SRC_HOST:-54.242.40.47}"
 
 # ============================================
 # Setup
