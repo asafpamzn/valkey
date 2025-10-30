@@ -36,7 +36,7 @@ sudo criu dump -t "$PID" \
   --page-server --address 127.0.0.1 --port "$PORT" \
   --tcp-close --ext-unix-sk \
   --leave-running \
-  -v2 -o "$IMAGES_DIR/dump.log"
+  -v3 -o "$IMAGES_DIR/dump.log"
 
 # 3) Stop the local page-server (it usually exits itself, but ensure)
 pkill -f "criu page-server.*127.0.0.1.*$PORT" || true
