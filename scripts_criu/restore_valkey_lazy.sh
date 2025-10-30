@@ -12,6 +12,9 @@
 
 set -euo pipefail
 
+MAX_RETRIES=300
+RETRY_DELAY=0.5
+
 # -------- defaults --------
 SRC_IP=""
 SRC_PORT=""
@@ -35,124 +38,145 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $
 # -------- arg parsing --------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --src-ip)        SRC_IP="${2:?}"; shift 2;;
-    --src-port)      SRC_PORT="${2:?}"; shift 2;;
-    --images-dir)    IMAGES_DIR="${2:?}"; shift 2;;
-    --valkey-port)   VALKEY_PORT="${2:?}"; shift 2;;
-    --owner)         OWNER="${2:?}"; shift 2;;
-    --group)         GROUP="${2:?}"; shift 2;;
+    --src-ip)         SRC_IP="${2:?}"; shift 2;;
+    --src-port)       SRC_PORT="${2:?}"; shift 2;;
+    --images-dir)     IMAGES_DIR="${2:?}"; shift 2;;
+    --valkey-port)    VALKEY_PORT="${2:?}"; shift 2;;
+    --owner)          OWNER="${2:?}"; shift 2;;
+    --group)          GROUP="${2:?}"; shift 2;;
     --skip-rwx-check) SKIP_RWX_CHECK=1; shift 1;;
-    --replica-of)    REPLICA_OF="${2:?}"; shift 2;;
-    -h|--help) sed -n '1,80p' "$0"; exit 0;;
+    --replica-of)     REPLICA_OF="${2:?}"; shift 2;;
+    -h|--help) sed -n '1,120p' "$0"; exit 0;;
     *) die "Unknown arg: $1";;
   esac
 done
 
 [[ -n "$SRC_IP" && -n "$SRC_PORT" && -n "$IMAGES_DIR" ]] || die "Required: --src-ip --src-port --images-dir"
 
-# -------- preflight --------
+# Preflight tools just once (hard failures should not be retried)
 need_cmd criu
 need_cmd nc
 need_cmd ss
-need_cmd stat
 need_cmd awk
 need_cmd tee
 
-echo "🔧 Config:"
-echo "  Source page-server: ${SRC_IP}:${SRC_PORT}"
-echo "  Images dir        : ${IMAGES_DIR}"
-echo "  Valkey port       : ${VALKEY_PORT}"
-echo "  Owner:Group       : ${OWNER}:${GROUP}"
-echo "  Skip rwx check    : ${SKIP_RWX_CHECK}"
-[[ -n "$REPLICA_OF" ]] && echo "  Post-restore      : replicaof $REPLICA_OF"
+cleanup_lazy() {
+  local lp_pid="${1:-}"
+  [[ -n "$lp_pid" ]] && kill "$lp_pid" 2>/dev/null || true
+  sudo rm -f "$WORK_DIR/lazy-pages.socket" 2>/dev/null || true
+}
 
-[[ -d "$IMAGES_DIR" ]] || die "Images dir not found: $IMAGES_DIR"
+attempt_restore() {
+  # IMPORTANT: don’t let set -e kill the script from inside this function.
+  # We guard each risky command with `|| { echo ...; cleanup; return 1; }`
+  local LP_PID=""
 
-echo "🧪 Checking connectivity to source page-server..."
-nc -vz -w 3 "$SRC_IP" "$SRC_PORT" || die "Cannot reach ${SRC_IP}:${SRC_PORT}"
+  echo "🔧 Config:"
+  echo "  Source page-server: ${SRC_IP}:${SRC_PORT}"
+  echo "  Images dir        : ${IMAGES_DIR}"
+  echo "  Valkey port       : ${VALKEY_PORT}"
+  echo "  Owner:Group       : ${OWNER}:${GROUP}"
+  echo "  Skip rwx check    : ${SKIP_RWX_CHECK}"
+  [[ -n "$REPLICA_OF" ]] && echo "  Post-restore      : replicaof $REPLICA_OF"
 
-echo "🧰 Enabling userfaultfd..."
-echo 1 | sudo tee /proc/sys/vm/unprivileged_userfaultfd >/dev/null || true
+  [[ -d "$IMAGES_DIR" ]] || { echo "❌ Images dir not found: $IMAGES_DIR"; return 1; }
 
-echo "📁 Preparing directories & permissions..."
-sudo mkdir -p "$WORK_DIR" "$LOG_DIR" "$DATA_DIR"
-# CRIU is picky: match common expected perms (0750 for data dir, 0660 for logs).
-sudo chmod 0750 "$DATA_DIR"
-sudo touch "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log"
-sudo chmod 0660 "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log"
-# Ownership (adjusts to args)
-sudo chown -R "$OWNER:$GROUP" "$DATA_DIR" "$LOG_DIR" || true
+  echo "🧪 Checking connectivity to source page-server..."
+  nc -vz -w 3 "$SRC_IP" "$SRC_PORT" >/dev/null 2>&1 || { echo "❌ Cannot reach ${SRC_IP}:${SRC_PORT}"; return 1; }
 
-echo "🧹 Cleaning old lazy-pages socket..."
-sudo rm -f "$WORK_DIR/lazy-pages.socket"
+  echo "🧰 Enabling userfaultfd..."
+  echo 1 | sudo tee /proc/sys/vm/unprivileged_userfaultfd >/dev/null || true
 
-echo "▶️ Starting lazy-pages helper (background)..."
-sudo criu lazy-pages \
-  --images-dir "$IMAGES_DIR" \
-  --work-dir   "$WORK_DIR" \
-  --address "$SRC_IP" --port "$SRC_PORT" \
-  -v2 -o "$LAZY_LOG" &
+  echo "📁 Preparing directories & permissions..."
+  sudo mkdir -p "$WORK_DIR" "$LOG_DIR" "$DATA_DIR" || { echo "❌ mkdir failed"; return 1; }
+  sudo chmod 0750 "$DATA_DIR" || true
+  sudo touch "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log" || { echo "❌ log touch failed"; return 1; }
+  sudo chmod 0660 "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log" || true
+  sudo chown -R "$OWNER:$GROUP" "$DATA_DIR" "$LOG_DIR" || true
 
-LP_PID=$!
-# Wait for the socket to appear
-for i in {1..50}; do
-  [[ -S "$WORK_DIR/lazy-pages.socket" ]] && break
-  sleep 0.1
-done
-[[ -S "$WORK_DIR/lazy-pages.socket" ]] || { sudo tail -n 60 "$LAZY_LOG" 2>/dev/null || true; die "lazy-pages socket didn't appear at $WORK_DIR/lazy-pages.socket"; }
+  echo "🧹 Cleaning old lazy-pages socket..."
+  sudo rm -f "$WORK_DIR/lazy-pages.socket" || true
 
-echo "📎 lazy-pages helper PID: $LP_PID (socket up)"
+  echo "▶️ Starting lazy-pages helper..."
+  sudo criu lazy-pages \
+    --images-dir "$IMAGES_DIR" \
+    --work-dir   "$WORK_DIR" \
+    --address "$SRC_IP" --port "$SRC_PORT" \
+    -v2 -o "$LAZY_LOG" &
+  LP_PID=$!
 
-# Build restore args
-RESTORE_ARGS=(
-  --images-dir "$IMAGES_DIR"
-  --work-dir   "$WORK_DIR"
-  --lazy-pages
-  --tcp-close --ext-unix-sk
-  -v2 -o "$RESTORE_LOG"
-)
-[[ "$SKIP_RWX_CHECK" -eq 1 ]] && RESTORE_ARGS+=(--skip-file-rwx-check)
-
-echo "🔁 Running CRIU restore..."
-if ! sudo criu restore "${RESTORE_ARGS[@]}"; then
-  echo "⚠️ Restore failed. Last logs:"
-  (echo "==> $LAZY_LOG"; sudo tail -n 80 "$LAZY_LOG" 2>/dev/null || true)
-  (echo "==> $RESTORE_LOG"; sudo tail -n 120 "$RESTORE_LOG" 2>/dev/null || true)
-  kill "$LP_PID" 2>/dev/null || true
-  exit 1
-fi
-
-# The lazy-pages helper often exits on success after wiring up UFFD.
-wait "$LP_PID" 2>/dev/null || true
-
-echo "🩺 Checking Valkey port..."
-for i in {1..50}; do
-  if sudo ss -lntp | awk -v p=":${VALKEY_PORT}" '$4 ~ p {ok=1} END{exit ok?0:1}'; then
-    echo "✅ Valkey is listening on port $VALKEY_PORT"
-    break
+  # Wait for socket to appear
+  for _ in {1..50}; do
+    [[ -S "$WORK_DIR/lazy-pages.socket" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -S "$WORK_DIR/lazy-pages.socket" ]]; then
+    echo "❌ lazy-pages socket didn't appear"
+    sudo tail -n 60 "$LAZY_LOG" 2>/dev/null || true
+    cleanup_lazy "$LP_PID"
+    return 1
   fi
-  sleep 0.1
-done
+  echo "📎 lazy-pages PID: $LP_PID"
 
-if ! sudo ss -lntp | grep -q ":${VALKEY_PORT}\b"; then
+  local RESTORE_ARGS=(
+    --images-dir "$IMAGES_DIR"
+    --work-dir   "$WORK_DIR"
+    --lazy-pages
+    --tcp-close --ext-unix-sk
+    -v2 -o "$RESTORE_LOG"
+  )
+  [[ "$SKIP_RWX_CHECK" -eq 1 ]] && RESTORE_ARGS+=(--skip-file-rwx-check)
+
+  echo "🔁 Running CRIU restore..."
+  if ! sudo criu restore "${RESTORE_ARGS[@]}"; then
+    echo "⚠️ Restore failed. Last logs:"
+    (echo "==> $LAZY_LOG"; sudo tail -n 80 "$LAZY_LOG" 2>/dev/null || true)
+    (echo "==> $RESTORE_LOG"; sudo tail -n 120 "$RESTORE_LOG" 2>/dev/null || true)
+    cleanup_lazy "$LP_PID"
+    return 1
+  fi
+
+  # The lazy-pages helper often exits on success; that's fine.
+  wait "$LP_PID" 2>/dev/null || true
+
+  echo "🩺 Checking Valkey port..."
+  for _ in {1..50}; do
+    if sudo ss -lntp | awk -v p=":${VALKEY_PORT}" '$4 ~ p {ok=1} END{exit ok?0:1}'; then
+      echo "✅ Valkey is listening on port $VALKEY_PORT"
+      # Optional post-step: replicaof
+      if [[ -n "$REPLICA_OF" ]]; then
+        if command -v valkey-cli >/dev/null 2>&1; then
+          local HOST="${REPLICA_OF%:*}" PORT="${REPLICA_OF#*:}"
+          echo "🔁 Setting replicaof $HOST $PORT ..."
+          valkey-cli -p "$VALKEY_PORT" replicaof "$HOST" "$PORT" || echo "⚠️ replicaof command failed; continuing."
+        else
+          echo "ℹ️ valkey-cli not found; skipping replicaof."
+        fi
+      fi
+      cleanup_lazy # best-effort
+      return 0
+    fi
+    sleep 0.1
+  done
+
   echo "⚠️ Valkey not listening yet. Tail logs for clues:"
   (echo "==> $LAZY_LOG"; sudo tail -n 80 "$LAZY_LOG" 2>/dev/null || true)
   (echo "==> $RESTORE_LOG"; sudo tail -n 120 "$RESTORE_LOG" 2>/dev/null || true)
-  exit 2
-fi
+  cleanup_lazy "$LP_PID"
+  return 1
+}
 
-# Optional post-step: make this node a replica
-if [[ -n "$REPLICA_OF" ]]; then
-  need_cmd valkey-cli
-  HOST="${REPLICA_OF%:*}"
-  PORT="${REPLICA_OF#*:}"
-  echo "🔁 Setting replicaof $HOST $PORT ..."
-  if ! valkey-cli -p "$VALKEY_PORT" replicaof "$HOST" "$PORT"; then
-    echo "⚠️ replicaof command failed; continuing."
+# -------- retry loop --------
+for attempt in $(seq 1 "$MAX_RETRIES"); do
+  echo "🔄 Attempt $attempt of $MAX_RETRIES..."
+  if attempt_restore; then
+    echo "🏁 Restore succeeded on attempt $attempt."
+    exit 0
   fi
-fi
+  if [[ "$attempt" -lt "$MAX_RETRIES" ]]; then
+    echo "❌ Attempt $attempt failed. Retrying in ${RETRY_DELAY}s..."
+    sleep "$RETRY_DELAY"
+  fi
+done
 
-echo "🏁 Done."
-echo "   Logs:"
-echo "     $RESTORE_LOG"
-echo "     $LAZY_LOG"
+die "Restore failed after $MAX_RETRIES attempts."
