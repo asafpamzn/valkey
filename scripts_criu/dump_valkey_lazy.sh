@@ -6,7 +6,7 @@ echo 1 | sudo tee /proc/sys/vm/unprivileged_userfaultfd >/dev/null
 IMAGES_DIR="/fsx/checkpoint1/final"
 WORK_DIR="/run/criu"
 PORT=9001
-
+sudo rm -fr "$IMAGES_DIR"/*
 PID=$(pgrep -x valkey-server)
 : "${PID:?valkey-server PID not found}"
 
@@ -36,7 +36,7 @@ sudo criu dump -t "$PID" \
   --page-server --address 127.0.0.1 --port "$PORT" \
   --tcp-close --ext-unix-sk \
   --leave-running \
-  -v4 -o "$IMAGES_DIR/dump.log"
+  -v1 -o "$IMAGES_DIR/dump.log"
 
 # 3) Stop the local page-server (it usually exits itself, but ensure)
 pkill -f "criu page-server.*127.0.0.1.*$PORT" || true
@@ -46,7 +46,7 @@ sudo criu page-server \
   --images-dir "$IMAGES_DIR" \
   --work-dir   "$WORK_DIR" \
   --address 0.0.0.0 --port "$PORT" \
-  -v4 -o "$IMAGES_DIR/page-server.serve.log" &
+  -v1 -o "$IMAGES_DIR/page-server.serve.log" &
 
 sleep 0.3
 if sudo ss -lntp | grep -q ":$PORT\b"; then

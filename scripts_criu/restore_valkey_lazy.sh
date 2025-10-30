@@ -91,7 +91,7 @@ sudo criu lazy-pages \
   --images-dir "$IMAGES_DIR" \
   --work-dir   "$WORK_DIR" \
   --address "$SRC_IP" --port "$SRC_PORT" \
-  -v4 -o "$LAZY_LOG" &
+  -v1 -o "$LAZY_LOG" &
 
 LP_PID=$!
 # Wait for the socket to appear

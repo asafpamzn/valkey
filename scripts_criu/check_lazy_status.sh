@@ -7,7 +7,7 @@
 set -euo pipefail
 
 LAZY_LOG="/var/log/valkey/lazy-pages.log"
-PAGE_LOG="/fsx/checkpoint1/final/page-server.log"
+PAGE_LOG="/fsx/checkpoint1/final/page-server.dump.log"
 VALKEY_PORT=6379
 INTERVAL=2
 
@@ -47,7 +47,7 @@ while true; do
   fi
 
   if [[ -f "$PAGE_LOG" ]]; then
-    if grep -q "page-xfer: Session over" "$PAGE_LOG"; then
+    if sudo grep -q "page-xfer: Session over" "$PAGE_LOG"; then
       page_done=1
     fi
   fi
