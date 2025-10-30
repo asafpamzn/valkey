@@ -16,6 +16,174 @@ The scripts support two migration modes:
 - **Shared Storage**: `/fsx/checkpoint1/` (FSx for Lustre)
 - **Lazy Pages Port**: `9001`
 
+## Environment Setup
+
+Before running the migration scripts, you need to set up your EC2 instance with Valkey and the necessary dependencies.
+
+### Prerequisites
+
+- Ubuntu 24.04 LTS (or compatible)
+- SSH access to EC2 instance
+- Git installed
+
+### Setup Steps
+
+1. **SSH to your EC2 instance:**
+   ```bash
+   ssh ubuntu@ec2-xx-xxx-xx-xxx.compute-1.amazonaws.com
+   ```
+
+2. **Create working directory:**
+   ```bash
+   mkdir work
+   cd work
+   ```
+
+3. **Clone the Valkey repository:**
+   ```bash
+   git clone https://github.com/asafpamzn/valkey.git
+   cd valkey
+   ```
+
+4. **Checkout the CRIU branch:**
+   ```bash
+   git checkout criu-sync
+   ```
+
+5. **Navigate to scripts directory:**
+   ```bash
+   cd scripts_criu
+   ```
+
+6. **Update package lists:**
+   ```bash
+   sudo apt update
+   ```
+
+7. **Install Valkey:**
+   ```bash
+   sudo apt install valkey
+   ```
+   
+   This will install:
+   - `valkey-server` - The Valkey server
+   - `valkey-tools` - CLI tools (valkey-cli, valkey-benchmark, etc.)
+   - Dependencies: `libatomic1`, `libjemalloc2`, `liblzf1`
+
+8. **Verify installation:**
+   ```bash
+   valkey-server --version
+   valkey-cli --version
+   ```
+
+### CRIU-Specific Configuration
+
+For CRIU to work properly with Valkey, additional configuration is required. CRIU needs the process to run in the same namespace as the user and requires file-based logging instead of systemd journal.
+
+   ```bash
+
+    sudo add-apt-repository ppa:criu/ppa -y
+    sudo apt update
+    sudo apt install criu -y
+    ```
+
+9. **Copy custom Valkey configuration:**
+   ```bash
+   sudo cp ~/work/valkey/scripts_criu/valkey.conf /etc/valkey/valkey.conf
+   ```
+
+10. **Update systemd service file for CRIU compatibility:**
+    ```bash
+    sudo nano /etc/systemd/system/valkey-server.service
+    ```
+    
+    Replace the content with:
+    ```ini
+    [Unit]
+    Description=Advanced key-value store
+    After=network.target
+    ConditionPathExists=!/etc/valkey/REDIS_MIGRATION
+    Documentation=https://valkey.io/docs/, man:valkey-server(1)
+
+    [Service]
+    Type=notify
+    ExecStart=/usr/bin/valkey-server /etc/valkey/valkey.conf --supervised systemd --daemonize no
+    PIDFile=/run/valkey/valkey-server.pid
+    TimeoutStopSec=0
+    Restart=always
+    User=ubuntu
+    Group=ubuntu
+
+    # Redirect output away from systemd journal to avoid socket issues with CRIU
+    StandardOutput=file:/var/log/valkey/stdout.log
+    StandardError=file:/var/log/valkey/stderr.log
+
+    UMask=007
+    LimitNOFILE=65535
+
+    # Namespace isolation DISABLED for same namespace as user (required for CRIU)
+    PrivateTmp=no
+    PrivateDevices=no
+    PrivateUsers=no
+    ProtectHome=no
+    ProtectSystem=no
+    ProtectClock=no
+    ProtectControlGroups=no
+    ProtectHostname=no
+    ProtectKernelLogs=no
+    ProtectKernelModules=no
+    ProtectKernelTunables=no
+    NoNewPrivileges=no
+    RestrictNamespaces=no
+
+    # Keep some basic security restrictions
+    LockPersonality=true
+    RestrictRealtime=true
+    RestrictSUIDSGID=true
+
+    [Install]
+    WantedBy=multi-user.target
+    Alias=valkey.service
+    ```
+    
+    **Key changes for CRIU:**
+    - Runs as `ubuntu:ubuntu` user (not root)
+    - Logs redirected to files (`/var/log/valkey/`) instead of systemd journal
+    - All namespace isolation disabled (CRIU requires same namespace)
+    - Basic security restrictions maintained
+
+11. **Set up directories and permissions:**
+    ```bash
+    # Create necessary directories
+    sudo mkdir -p /run/valkey /var/log/valkey
+    
+    # Set ownership to ubuntu user
+    sudo chown ubuntu:ubuntu /run/valkey
+    sudo chown ubuntu:ubuntu /etc/valkey
+    sudo chown -R ubuntu:ubuntu /var/lib/valkey
+    sudo chown -R ubuntu:ubuntu /var/log/valkey
+    sudo chown ubuntu:ubuntu /etc/valkey/valkey.conf
+    
+    # Set permissions
+    sudo chmod 755 /run/valkey
+    sudo chmod 755 /etc/valkey
+    ```
+
+12. **Reload systemd and restart Valkey:**
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl restart valkey-server
+    sudo systemctl status valkey-server
+    ```
+    
+    Verify Valkey is running:
+    ```bash
+    valkey-cli ping
+    # Should return: PONG
+    ```
+
+Now you're ready to run the migration scripts!
+
 ## Quick Start
 
 ### Traditional Mode (Default)
