@@ -91,7 +91,7 @@ sudo criu lazy-pages \
   --images-dir "$IMAGES_DIR" \
   --work-dir   "$WORK_DIR" \
   --address "$SRC_IP" --port "$SRC_PORT" \
-  -v1 -o "$LAZY_LOG" &
+  -v2 -o "$LAZY_LOG" &
 
 LP_PID=$!
 # Wait for the socket to appear
@@ -109,7 +109,7 @@ RESTORE_ARGS=(
   --work-dir   "$WORK_DIR"
   --lazy-pages
   --tcp-close --ext-unix-sk
-  -v4 -o "$RESTORE_LOG"
+  -v2 -o "$RESTORE_LOG"
 )
 [[ "$SKIP_RWX_CHECK" -eq 1 ]] && RESTORE_ARGS+=(--skip-file-rwx-check)
 

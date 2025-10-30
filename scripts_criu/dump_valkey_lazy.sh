@@ -20,7 +20,7 @@ sudo criu page-server \
   --images-dir "$IMAGES_DIR" \
   --work-dir   "$WORK_DIR" \
   --address 127.0.0.1 --port "$PORT" \
-  -v4 -o "$IMAGES_DIR/page-server.dump.log" &
+  -v2 -o "$IMAGES_DIR/page-server.dump.log" &
 
 # Wait for it
 for _ in {1..50}; do
@@ -36,7 +36,7 @@ sudo criu dump -t "$PID" \
   --page-server --address 127.0.0.1 --port "$PORT" \
   --tcp-close --ext-unix-sk \
   --leave-running \
-  -v1 -o "$IMAGES_DIR/dump.log"
+  -v2 -o "$IMAGES_DIR/dump.log"
 
 # 3) Stop the local page-server (it usually exits itself, but ensure)
 pkill -f "criu page-server.*127.0.0.1.*$PORT" || true
@@ -46,7 +46,7 @@ sudo criu page-server \
   --images-dir "$IMAGES_DIR" \
   --work-dir   "$WORK_DIR" \
   --address 0.0.0.0 --port "$PORT" \
-  -v1 -o "$IMAGES_DIR/page-server.serve.log" &
+  -v2 -o "$IMAGES_DIR/page-server.serve.log" &
 
 sleep 0.3
 if sudo ss -lntp | grep -q ":$PORT\b"; then
