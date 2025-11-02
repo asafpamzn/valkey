@@ -14,7 +14,7 @@
 set -euo pipefail
 
 MAX_RETRIES=300
-RETRY_DELAY=1
+RETRY_DELAY=5
 
 # -------- defaults --------
 SRC_IP=""
@@ -89,7 +89,7 @@ attempt_restore() {
     fi
     sleep 0.1
   done
-
+  sleep 3
   echo "🔧 Config:"
   echo "  Source page-server: ${SRC_IP}:${SRC_PORT}"
   echo "  Images dir        : ${IMAGES_DIR}"
