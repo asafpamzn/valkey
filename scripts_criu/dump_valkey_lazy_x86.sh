@@ -8,7 +8,7 @@ FINAL_DIR="$BASE_DIR/final"
 WORK_DIR="/run/criu"
 PORT=9001
 ROUNDS=${ROUNDS:-3}          # number of pre-dumps (tune)
-VERB="-v1"                   # make logs a bit chattier
+VERB="-v3"                   # make logs a bit chattier
 
 sudo rm -rf "$BASE_DIR"/pre* "$FINAL_DIR"
 sudo mkdir -p "$WORK_DIR" "$FINAL_DIR"
@@ -73,9 +73,10 @@ pkill -f "criu page-server.*127.0.0.1.*$PORT" || true
 
 # --- Serve images (final + parents must remain in place) ---
 echo "📡 serving images for destination on 0.0.0.0:$PORT"
-sudo criu page-server \
+sudo criu  lazy-pages\
   --images-dir "$FINAL_DIR" \
   --work-dir   "$WORK_DIR" \
+  --page-server \
   --address 0.0.0.0 --port "$PORT" \
   $VERB -o "$FINAL_DIR/page-server.serve.log" &
 
@@ -87,3 +88,4 @@ echo "   Serve:   ${SRC_CONNECT_IP}:$PORT"
 echo "   Logs:    $FINAL_DIR/dump.log"
 echo "            $FINAL_DIR/page-server.dump.log"
 echo "            $FINAL_DIR/page-server.serve.log"
+
