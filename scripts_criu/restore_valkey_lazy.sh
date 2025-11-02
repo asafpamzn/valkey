@@ -23,7 +23,6 @@ IMAGES_DIR=""
 VALKEY_PORT=6379
 OWNER="${SUDO_USER:-$USER}"
 GROUP="$OWNER"
-SKIP_RWX_CHECK=0
 REPLICA_OF=""
 
 LOG_DIR="/var/log/valkey"
@@ -45,7 +44,6 @@ while [[ $# -gt 0 ]]; do
     --valkey-port)    VALKEY_PORT="${2:?}"; shift 2;;
     --owner)          OWNER="${2:?}"; shift 2;;
     --group)          GROUP="${2:?}"; shift 2;;
-    --skip-rwx-check) SKIP_RWX_CHECK=1; shift 1;;
     --replica-of)     REPLICA_OF="${2:?}"; shift 2;;
     -h|--help) sed -n '1,120p' "$0"; exit 0;;
     *) die "Unknown arg: $1";;
@@ -77,7 +75,7 @@ attempt_restore() {
   echo "  Images dir        : ${IMAGES_DIR}"
   echo "  Valkey port       : ${VALKEY_PORT}"
   echo "  Owner:Group       : ${OWNER}:${GROUP}"
-  echo "  Skip rwx check    : ${SKIP_RWX_CHECK}"
+
   [[ -n "$REPLICA_OF" ]] && echo "  Post-restore      : replicaof $REPLICA_OF"
 
   [[ -d "$IMAGES_DIR" ]] || { echo "❌ Images dir not found: $IMAGES_DIR"; return 1; }
@@ -128,7 +126,7 @@ attempt_restore() {
     --tcp-close --ext-unix-sk
     -v2 -o "$RESTORE_LOG"
   )
-  [[ "$SKIP_RWX_CHECK" -eq 1 ]] && RESTORE_ARGS+=(--skip-file-rwx-check)
+
 
   echo "🔁 Running CRIU restore..."
   if ! sudo criu restore "${RESTORE_ARGS[@]}"; then
