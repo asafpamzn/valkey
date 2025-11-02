@@ -8,7 +8,7 @@ FINAL_DIR="$BASE_DIR/final"
 WORK_DIR="/run/criu"
 PORT=9001
 ROUNDS=${ROUNDS:-3}          # number of pre-dumps (tune)
-VERB="-v3"                   # make logs a bit chattier
+VERB="-v2"                   # make logs a bit chattier
 
 sudo rm -rf "$BASE_DIR"/pre* "$FINAL_DIR"
 sudo mkdir -p "$WORK_DIR" "$FINAL_DIR"
@@ -52,6 +52,8 @@ sudo criu page-server \
   --address 127.0.0.1 --port "$PORT" \
   $VERB -o "$FINAL_DIR/page-server.dump.log" &
 
+echo "PLEASE START..." | sudo tee "$FINAL_DIR/done.log" >/dev/null
+
 for _ in {1..50}; do sudo ss -lntp | grep -q ":$PORT\b" && break; sleep 0.1; done
 sudo ss -lntp | grep -q ":$PORT\b" || { echo "❌ local page-server not listening"; exit 1; }
 
@@ -68,7 +70,6 @@ sudo criu dump -t "$PID" \
   --ext-unix-sk --leave-running \
   $VERB -o "$FINAL_DIR/dump.log"
 t1=$(date +%s%3N)
-echo "asaf"
 pkill -f "criu page-server.*127.0.0.1.*$PORT" || true
 
 # --- Serve images (final + parents must remain in place) ---
@@ -87,4 +88,3 @@ echo "   Serve:   ${SRC_CONNECT_IP}:$PORT"
 echo "   Logs:    $FINAL_DIR/dump.log"
 echo "            $FINAL_DIR/page-server.dump.log"
 echo "            $FINAL_DIR/page-server.serve.log"
-
