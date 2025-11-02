@@ -8,7 +8,7 @@ FINAL_DIR="$BASE_DIR/final"
 WORK_DIR="/run/criu"
 PORT=9001
 ROUNDS=${ROUNDS:-3}          # number of pre-dumps (tune)
-VERB="-v3"                   # make logs a bit chattier
+VERB="-v1"                   # make logs a bit chattier
 
 sudo rm -rf "$BASE_DIR"/pre* "$FINAL_DIR"
 sudo mkdir -p "$WORK_DIR" "$FINAL_DIR"
