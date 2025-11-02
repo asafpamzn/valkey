@@ -14,7 +14,7 @@
 set -euo pipefail
 
 MAX_RETRIES=300
-RETRY_DELAY=0.5
+RETRY_DELAY=1
 
 # -------- defaults --------
 SRC_IP=""
@@ -66,9 +66,29 @@ cleanup_lazy() {
 }
 
 attempt_restore() {
-  # IMPORTANT: don’t let set -e kill the script from inside this function.
+  # IMPORTANT: don't let set -e kill the script from inside this function.
   # We guard each risky command with `|| { echo ...; cleanup; return 1; }`
   local LP_PID=""
+
+  # Wait for dump completion signal
+  local LOG_FILE="$IMAGES_DIR/done.log"
+  local SUCCESS_MSG="PLEASE START..."
+  
+  echo "⏳ Waiting for dump completion signal in $LOG_FILE..."
+  while [[ ! -f "$LOG_FILE" ]]; do
+    printf "."
+    sleep 0.1
+  done
+
+  # Poll file until the success line appears
+  while true; do
+    if sudo grep -q "$SUCCESS_MSG" "$LOG_FILE"; then
+      echo
+      echo "✅ Dump completed successfully — starting restore..."
+      break
+    fi
+    sleep 0.1
+  done
 
   echo "🔧 Config:"
   echo "  Source page-server: ${SRC_IP}:${SRC_PORT}"
