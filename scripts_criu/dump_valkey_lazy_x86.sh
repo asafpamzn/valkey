@@ -73,10 +73,9 @@ pkill -f "criu page-server.*127.0.0.1.*$PORT" || true
 
 # --- Serve images (final + parents must remain in place) ---
 echo "📡 serving images for destination on 0.0.0.0:$PORT"
-sudo criu  lazy-pages\
+sudo criu page-server \
   --images-dir "$FINAL_DIR" \
   --work-dir   "$WORK_DIR" \
-  --page-server \
   --address 0.0.0.0 --port "$PORT" \
   $VERB -o "$FINAL_DIR/page-server.serve.log" &
 
