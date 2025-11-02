@@ -9,7 +9,8 @@
 #
 # Example:
 #   sudo ./restore_valkey_lazy.sh --src-ip 10.0.14.165 --src-port 9001 --images-dir /fsx/checkpoint1/final --owner ubuntu --group ubuntu
-
+ #  sudo ./restore_valkey_lazy.sh --src-ip 10.0.8.10 --src-port 9001 --images-dir /fsx/checkpoint1/final --owner ubuntu --group ubuntu
+ #  sudo ./restore_valkey_lazy.sh --src-ip 10.0.6.235 --src-port 9001 --images-dir /fsx/checkpoint1/final --owner ubuntu --group ubuntu
 set -euo pipefail
 
 MAX_RETRIES=300
@@ -101,6 +102,7 @@ attempt_restore() {
   sudo criu lazy-pages \
     --images-dir "$IMAGES_DIR" \
     --work-dir   "$WORK_DIR" \
+    --skip-file-rwx-check \
     --address "$SRC_IP" --port "$SRC_PORT" \
     -v2 -o "$LAZY_LOG" &
   LP_PID=$!
@@ -122,6 +124,7 @@ attempt_restore() {
     --images-dir "$IMAGES_DIR"
     --work-dir   "$WORK_DIR"
     --lazy-pages
+    --skip-file-rwx-check
     --tcp-close --ext-unix-sk
     -v2 -o "$RESTORE_LOG"
   )
