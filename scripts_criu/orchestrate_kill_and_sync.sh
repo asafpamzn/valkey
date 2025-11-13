@@ -36,10 +36,11 @@ echo "🔄 Step 3: Starting wait_and_replicate.sh in background"
 REPLICATE_PID=$!
 echo "✅ wait_and_replicate.sh started (PID: $REPLICATE_PID)"
 
-# Step 4: Execute remote dump script on source machine
-echo "📡 Step 4: Executing dump script on source machine"
-sudo -u $SUDO_USER -H bash -c "ssh -o StrictHostKeyChecking=no $SOURCE_USER@$SOURCE_HOST 'bash $SOURCE_SCRIPT'"
-echo "✅ Remote dump script completed"
+# Step 4: Signal source machine that destination is ready
+echo "🚦 Step 4: Creating ready signal for source machine"
+echo "READY" | sudo tee "$IMAGES_DIR/ready.log" >/dev/null
+echo "✅ Ready signal created at $IMAGES_DIR/ready.log"
+echo "   Source machine can now start the dump process"
 
 # Step 5: Wait for "PAGE SERVER READY TO SERVE" in log file
 echo "⏳ Step 5: Waiting for 'PAGE SERVER READY TO SERVE' in $LOG_FILE"
