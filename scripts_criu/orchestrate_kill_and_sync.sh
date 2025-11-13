@@ -4,7 +4,7 @@ set -euo pipefail
 # Configuration
 SOURCE_HOST="ec2-54-221-42-237.compute-1.amazonaws.com"
 SOURCE_USER="ubuntu"
-SOURCE_SCRIPT="/home/ubuntu/work/valkey/scripts_criu/dump_replica_lazy.sh"
+SOURCE_SCRIPT="/home/ubuntu/work/criu/dump_replica_lazy.sh"
 DEST_IP="10.0.14.165"
 PORT=9002
 IMAGES_DIR="/fsx/lazy"
