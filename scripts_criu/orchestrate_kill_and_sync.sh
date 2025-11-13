@@ -38,7 +38,7 @@ echo "✅ wait_and_replicate.sh started (PID: $REPLICATE_PID)"
 
 # Step 4: Execute remote dump script on source machine
 echo "📡 Step 4: Executing dump script on source machine"
-sudo -u ubuntu ssh -o StrictHostKeyChecking=no "$SOURCE_USER@$SOURCE_HOST" "bash $SOURCE_SCRIPT"
+su - ubuntu -c "ssh -o StrictHostKeyChecking=no $SOURCE_USER@$SOURCE_HOST 'bash $SOURCE_SCRIPT'"
 echo "✅ Remote dump script completed"
 
 # Step 5: Wait for "PAGE SERVER READY TO SERVE" in log file
