@@ -86,6 +86,7 @@ For CRIU to work properly with Valkey, additional configuration is required. CRI
     sudo apt update
     sudo apt install criu -y
     ```
+    create shared fsx device and follow https://docs.aws.amazon.com/fsx/latest/LustreGuide/install-lustre-client.html?icmpid=docs_fsx_console
 
 9. **Copy custom Valkey configuration:**
    ```bash

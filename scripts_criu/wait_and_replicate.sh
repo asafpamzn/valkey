@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-REPLICA_HOST="ec2-54-242-40-47.compute-1.amazonaws.com"
+REPLICA_HOST="ec2-52-91-2-183.compute-1.amazonaws.com"
 REPLICA_PORT=6379
 MAX_WAIT=30000  # 3000 × 0.1s = 300s (5 minutes)
 
