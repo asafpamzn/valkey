@@ -9,6 +9,7 @@ Documentation=https://valkey.io/docs/, man:valkey-server(1)
 
 [Service]
 Type=notify
+OOMScoreAdjust=-1000
 ExecStart=/usr/bin/valkey-server /etc/valkey/valkey.conf --supervised systemd --daemonize no
 PIDFile=/run/valkey/valkey-server.pid
 TimeoutStopSec=0
