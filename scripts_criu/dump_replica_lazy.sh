@@ -17,6 +17,11 @@ echo "  Log File       : $LOG_FILE"
 echo "  Ready Signal   : $READY_FILE"
 echo "----------------------------------------------------------------"
 
+
+echo "🧹 Step 1: Cleaning up $IMAGES_DIR/*"
+sudo rm -rf "$IMAGES_DIR"/*
+echo "✅ Cleanup complete"
+
 # Wait for destination to be ready
 echo "⏳ Waiting for destination ready signal at $READY_FILE"
 START_TIME=$(date +%s)
@@ -52,6 +57,7 @@ sudo criu dump \
   --ext-unix-sk \
   -v2 -o "$LOG_FILE" \
   --leave-running
+
 
 echo "✅ CRIU dump completed successfully"
 echo "📋 Check log at: $LOG_FILE"
