@@ -68,6 +68,7 @@ sudo criu lazy-pages \
   --address "$DEST_IP" \
   --port "$PORT" \
   --tcp-close \
+  --cow-dump \
   -v2 -o "$IMAGES_DIR/lazy-server.log" &
 PAGE_SERVER_PID=$!
 echo "✅ Page server started (PID: $PAGE_SERVER_PID)"
@@ -82,6 +83,7 @@ sudo criu restore \
   --images-dir "$IMAGES_DIR" \
   --lazy-pages \
   --tcp-close \
+  --cow-dump \
   --skip-file-rwx-check \
   -v2 -o "$IMAGES_DIR/lazy-restore.log"
 
