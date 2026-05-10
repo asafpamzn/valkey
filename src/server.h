@@ -1094,6 +1094,20 @@ typedef struct replDataBuf {
 #define UPGRADE_STATE_PAUSED     6
 
 #define UPGRADE_KEYS_PER_CYCLE   1000
+#define UPGRADE_MAX_THREADS      10
+
+/* Receiver state (on new_replica side) for parallel insertion */
+typedef struct upgradeRecvState {
+    int total_threads;
+    int channels_registered;         /* How many UPGRADE.CHANNEL have arrived */
+    int fds[UPGRADE_MAX_THREADS];    /* fds taken from UPGRADE.CHANNEL clients */
+    client *clients[UPGRADE_MAX_THREADS]; /* client objects (kept alive during transfer) */
+    pthread_t threads[UPGRADE_MAX_THREADS];
+    long long keys_inserted[UPGRADE_MAX_THREADS]; /* per-thread counters */
+    int thread_done[UPGRADE_MAX_THREADS];
+    int thread_error[UPGRADE_MAX_THREADS];
+    int all_done;                    /* Set to 1 when all threads finished */
+} upgradeRecvState;
 
 typedef struct upgradeState {
     int state;
@@ -2414,6 +2428,7 @@ struct valkeyServer {
     char *debug_context; /* A free-form string that has no impact on server except being included in a crash report. */
     /* Online upgrade */
     upgradeState *upgrade;
+    upgradeRecvState *upgrade_recv;  /* Receiver state for parallel upgrade (new_replica side) */
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -4153,6 +4168,8 @@ int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr);
 void dumpCommand(client *c);
 void upgradeCommand(client *c);
 void upgradeRestoreCommand(client *c);
+void upgradeChannelCommand(client *c);
+void upgradeDoneCommand(client *c);
 void upgradeInit(void);
 void upgradeFree(void);
 void upgradeCron(void);

@@ -2135,6 +2135,36 @@ size_t hashtableScanDefrag(hashtable *ht, size_t cursor, hashtableScanFunction f
     return cursor;
 }
 
+/* Iterate entries in specific buckets: bucket_idx % stride == offset.
+ * Requires: no rehashing in progress (assert !hashtableIsRehashing).
+ * Thread-safe for concurrent reads when rehashing is paused/forbidden
+ * and each caller uses a different offset. */
+void hashtableIterateBucketRange(hashtable *ht, int stride, int offset, hashtableScanFunction fn, void *privdata) {
+    if (hashtableSize(ht) == 0) return;
+    assert(!hashtableIsRehashing(ht));
+
+    size_t num_bkts = numBuckets(ht->bucket_exp[0]);
+    for (size_t idx = (size_t)offset; idx < num_bkts; idx += stride) {
+        bucket *b = &ht->tables[0][idx];
+        do {
+            if (b->presence != 0) {
+                for (int pos = 0; pos < ENTRIES_PER_BUCKET; pos++) {
+                    if (isPositionFilled(b, pos)) {
+                        fn(privdata, b->entries[pos]);
+                    }
+                }
+            }
+            if (!b->chained) break;
+            b = getChildBucket(b);
+        } while (b != NULL);
+    }
+}
+
+/* Return the number of buckets in table[0]. */
+size_t hashtableNumBuckets(hashtable *ht) {
+    return numBuckets(ht->bucket_exp[0]);
+}
+
 /* --- Iterator --- */
 
 /* Initialize an iterator for a hashtable.

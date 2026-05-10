@@ -249,5 +249,107 @@ start_server {tags {"upgrade external:skip"}} {
             assert_equal [$replica get "db2:key"] "val2"
             $replica select 0
         }
+
+        test {UPGRADE THREADED basic key migration} {
+            $primary flushall
+            wait_for_ofs_sync $replica $primary
+
+            # Populate with keys
+            for {set i 0} {$i < 200} {incr i} {
+                $primary set "tkey:$i" "tval:$i"
+            }
+            $primary hset thash f1 v1 f2 v2 f3 v3
+            $primary lpush tlist a b c d e
+            $primary sadd tset x y z
+            $primary zadd tzset 1.0 a 2.0 b 3.0 c
+            wait_for_ofs_sync $replica $primary
+
+            set clients [$primary client list type replica]
+            regexp {id=(\d+)} $clients -> replica_client_id
+
+            # Start threaded upgrade
+            set result [$primary upgrade $replica_client_id threaded]
+            assert_equal $result {OK}
+
+            # Threaded upgrade should complete quickly (synchronous)
+            # It goes directly to DRAINING state
+            wait_for_condition 100 100 {
+                [dict get [$primary upgrade status] state] eq "done"
+            } else {
+                set status [$primary upgrade status]
+                fail "UPGRADE THREADED did not complete. Status: $status"
+            }
+
+            # Verify keys on replica
+            wait_for_condition 50 100 {
+                [$replica dbsize] >= 204
+            } else {
+                fail "Replica does not have all keys. dbsize=[$replica dbsize]"
+            }
+
+            assert_equal [$replica get "tkey:0"] "tval:0"
+            assert_equal [$replica get "tkey:199"] "tval:199"
+            assert_equal [$replica hget thash f2] "v2"
+            assert_equal [$replica lrange tlist 0 -1] {e d c b a}
+            assert_equal [lsort [$replica smembers tset]] {x y z}
+            assert_equal [$replica zrangebyscore tzset -inf +inf] {a b c}
+        }
+
+        test {UPGRADE THREADED replica INFO keyspace is correct} {
+            $primary flushall
+            wait_for_ofs_sync $replica $primary
+
+            # Create keys: some with TTL, some without, different types
+            for {set i 0} {$i < 100} {incr i} {
+                $primary set "info:$i" "val:$i"
+            }
+            for {set i 0} {$i < 50} {incr i} {
+                $primary set "ttl:$i" "expval:$i" EX 3600
+            }
+            for {set i 0} {$i < 20} {incr i} {
+                $primary hset "hash:$i" field1 val1 field2 val2
+            }
+            wait_for_ofs_sync $replica $primary
+
+            # Get primary keyspace info for comparison
+            set primary_info [$primary info keyspace]
+            regexp {keys=(\d+)} $primary_info -> primary_keys
+            regexp {expires=(\d+)} $primary_info -> primary_expires
+
+            set clients [$primary client list type replica]
+            regexp {id=(\d+)} $clients -> replica_client_id
+
+            $primary upgrade $replica_client_id threaded
+
+            wait_for_condition 100 100 {
+                [dict get [$primary upgrade status] state] eq "done"
+            } else {
+                fail "UPGRADE THREADED did not complete"
+            }
+
+            # Wait for receiver threads to finish
+            after 1000
+
+            # Check replica INFO keyspace matches primary
+            set replica_info [$replica info keyspace]
+            regexp {keys=(\d+)} $replica_info -> replica_keys
+            regexp {expires=(\d+)} $replica_info -> replica_expires
+
+            # DBSIZE should match
+            assert_equal [$replica dbsize] [$primary dbsize]
+
+            # Key count from INFO should match
+            assert_equal $replica_keys $primary_keys
+
+            # Expires count should match
+            assert_equal $replica_expires $primary_expires
+
+            # Verify specific keys exist and have correct TTL
+            assert_equal [$replica get "info:50"] "val:50"
+            assert_equal [$replica get "ttl:25"] "expval:25"
+            assert {[$replica ttl "ttl:25"] > 0}
+            assert_equal [$replica ttl "info:50"] {-1}
+            assert_equal [$replica hget "hash:10" field1] "val1"
+        }
     }
 }
