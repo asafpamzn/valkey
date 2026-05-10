@@ -572,6 +572,7 @@ ENGINE_SERVER_OBJ = \
     tls.o \
     tracking.o \
     unix.o \
+    upgrade.o \
     util.o \
     valkey-check-aof.o \
     valkey-check-rdb.o \

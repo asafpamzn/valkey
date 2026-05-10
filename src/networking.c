@@ -4110,6 +4110,12 @@ static void prefetchCommandQueueKeys(client *c) {
 }
 
 int processInputBuffer(client *c) {
+    /* During UPGRADE scanning, buffer primary input without processing */
+    if (c == server.primary && server.upgrade &&
+        server.upgrade->state == UPGRADE_STATE_SCANNING) {
+        return C_OK;
+    }
+
     /* Parse the query buffer and/or execute already parsed commands. */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
            c->cmd_queue.off < c->cmd_queue.len) {

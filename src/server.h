@@ -1084,6 +1084,29 @@ typedef struct replDataBuf {
     size_t peak;  /* Peak value of len during buffer lifetime */
 } replDataBuf;
 
+/* Online upgrade state (UPGRADE command) */
+#define UPGRADE_STATE_NONE       0
+#define UPGRADE_STATE_SCANNING   1
+#define UPGRADE_STATE_REPLAY     2
+#define UPGRADE_STATE_DRAINING   3
+#define UPGRADE_STATE_DONE       4
+#define UPGRADE_STATE_ABORTED    5
+#define UPGRADE_STATE_PAUSED     6
+
+#define UPGRADE_KEYS_PER_CYCLE   1000
+
+typedef struct upgradeState {
+    int state;
+    client *target_replica;
+    uint64_t target_client_id;
+    int current_db;
+    kvstoreIterator *iter;
+    long long keys_transferred;
+    long long keys_skipped;
+    long long bytes_transferred;
+    mstime_t start_time;
+} upgradeState;
+
 typedef struct {
     list *clients;
     size_t mem_usage_sum;
@@ -2389,6 +2412,8 @@ struct valkeyServer {
     /* Local environment */
     char *locale_collate;
     char *debug_context; /* A free-form string that has no impact on server except being included in a crash report. */
+    /* Online upgrade */
+    upgradeState *upgrade;
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -3182,6 +3207,7 @@ void replicationFeedReplicas(int dictid, robj **argv, int argc);
 void replicationFeedStreamFromPrimaryStream(char *buf, size_t buflen);
 void resetReplicationBuffer(void);
 void feedReplicationBuffer(char *buf, size_t len);
+void feedReplicationBufferWithObject(robj *o);
 void freeReplicaReferencedReplBuffer(client *replica);
 void replicationFeedMonitors(client *c, list *monitors, int dictid, robj **argv, int argc);
 void updateReplicasWaitingBgsave(int bgsaveerr, int type);
@@ -4125,6 +4151,12 @@ void readonlyCommand(client *c);
 void readwriteCommand(client *c);
 int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr);
 void dumpCommand(client *c);
+void upgradeCommand(client *c);
+void upgradeRestoreCommand(client *c);
+void upgradeInit(void);
+void upgradeFree(void);
+void upgradeCron(void);
+void upgradeProcessCycle(void);
 void objectCommand(client *c);
 void memoryCommand(client *c);
 void clientCommand(client *c);
