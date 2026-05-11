@@ -92,6 +92,7 @@ typedef struct upgradeSendWorker {
     long long keys_transferred;
     long long bytes_transferred;
     int error;
+    volatile int done;  /* Set atomically by thread before returning */
     char errmsg[256];
 } upgradeSendWorker;
 
@@ -188,6 +189,7 @@ static void *upgradeSendWorkerMain(void *arg) {
             w->error = 1;
         }
     }
+    atomic_store_explicit((_Atomic int *)&w->done, 1, memory_order_release);
     return NULL;
 }
 
@@ -766,7 +768,7 @@ void upgradeChannelCommand(client *c) {
             anetBlock(err, rs->fds[i]);
         }
 
-        /* Spawn sender threads */
+        /* Spawn sender threads (non-blocking — cron will join them) */
         upgradeSendWorker *workers = zcalloc(sizeof(upgradeSendWorker) * rs->total_threads);
         for (int i = 0; i < rs->total_threads; i++) {
             workers[i].thread_id = i;
@@ -774,55 +776,14 @@ void upgradeChannelCommand(client *c) {
             workers[i].fd = rs->fds[i];
         }
 
+        rs->workers = workers;
+        rs->sending = 1;
+
         for (int i = 0; i < rs->total_threads; i++) {
             pthread_create(&workers[i].thread, NULL, upgradeSendWorkerMain, &workers[i]);
         }
 
-        /* Wait for all sender threads */
-        long long total_keys = 0, total_bytes = 0;
-        int had_error = 0;
-        for (int i = 0; i < rs->total_threads; i++) {
-            pthread_join(workers[i].thread, NULL);
-            total_keys += workers[i].keys_transferred;
-            total_bytes += workers[i].bytes_transferred;
-            if (workers[i].error) {
-                serverLog(LL_WARNING, "UPGRADE.CHANNEL: sender thread %d error: %s", i, workers[i].errmsg);
-                had_error = 1;
-            }
-        }
-
-        /* Close dupped fds except fd[0] which we keep for delta forwarding */
-        for (int i = 1; i < rs->total_threads; i++) {
-            close(rs->fds[i]);
-        }
-        zfree(workers);
-
-        /* Re-enable rehashing */
-        hashtableSetResizePolicy(HASHTABLE_RESIZE_ALLOW);
-
-        serverLog(LL_NOTICE, "UPGRADE.CHANNEL: bulk transfer complete. %lld keys, %lld bytes%s. Entering delta phase.",
-                  total_keys, total_bytes, had_error ? " (with errors)" : "");
-
-        /* Send REPLINFO on fd[0] and enter delta phase */
-        if (server.primary_host == NULL) {
-            /* No Primary connected — no delta to forward. Send REPLINFO immediately. */
-            char offstr[21];
-            int offlen = ll2string(offstr, sizeof(offstr), server.primary_repl_offset);
-            char replinfo[256];
-            int rilen = snprintf(replinfo, sizeof(replinfo),
-                                 "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
-                                 server.replid, offlen, offstr);
-            write(rs->fds[0], replinfo, rilen);
-            close(rs->fds[0]);
-
-            serverLog(LL_NOTICE, "UPGRADE.CHANNEL: no primary, sent REPLINFO immediately.");
-            zfree(server.upgrade_recv);
-            server.upgrade_recv = NULL;
-        } else {
-            /* Primary connected — enter delta phase to forward buffered writes */
-            rs->delta_fd = rs->fds[0];
-            rs->delta_phase = 1;
-        }
+        serverLog(LL_NOTICE, "UPGRADE.CHANNEL: sender threads launched. Event loop continues.");
     }
 }
 
@@ -898,13 +859,77 @@ void upgradeProcessCycle(void) {
 }
 
 void upgradeCron(void) {
-    /* Check if delta phase is complete on m_replica */
-    if (server.upgrade_recv && server.upgrade_recv->delta_phase &&
-        server.upgrade_recv->delta_fd >= 0) {
-        /* Delta is done when primary querybuf is fully processed */
+    upgradeRecvState *rs = server.upgrade_recv;
+    if (rs == NULL) return;
+
+    /* Check if sender threads have finished (non-blocking via atomic done flag) */
+    if (rs->sending) {
+        int all_done = 1;
+        for (int i = 0; i < rs->total_threads; i++) {
+            if (!atomic_load_explicit((_Atomic int *)&rs->workers[i].done, memory_order_acquire)) {
+                all_done = 0;
+                break;
+            }
+        }
+        if (!all_done) return;
+
+        /* All threads signaled done — join them (instant, they already exited) */
+        for (int i = 0; i < rs->total_threads; i++) {
+            pthread_join(rs->workers[i].thread, NULL);
+        }
+
+        /* All sender threads finished — finalize */
+        long long total_keys = 0, total_bytes = 0;
+        int had_error = 0;
+        for (int i = 0; i < rs->total_threads; i++) {
+            total_keys += rs->workers[i].keys_transferred;
+            total_bytes += rs->workers[i].bytes_transferred;
+            if (rs->workers[i].error) {
+                serverLog(LL_WARNING, "UPGRADE.CHANNEL: sender thread %d error: %s",
+                          i, rs->workers[i].errmsg);
+                had_error = 1;
+            }
+        }
+
+        /* Close dupped fds except fd[0] which we keep for delta forwarding */
+        for (int i = 1; i < rs->total_threads; i++) {
+            close(rs->fds[i]);
+        }
+        zfree(rs->workers);
+        rs->workers = NULL;
+        rs->sending = 0;
+
+        /* Re-enable rehashing */
+        hashtableSetResizePolicy(HASHTABLE_RESIZE_ALLOW);
+
+        serverLog(LL_NOTICE, "UPGRADE.CHANNEL: bulk transfer complete. %lld keys, %lld bytes%s. Entering delta phase.",
+                  total_keys, total_bytes, had_error ? " (with errors)" : "");
+
+        /* Send REPLINFO on fd[0] and enter delta phase */
+        if (server.primary_host == NULL) {
+            char offstr[21];
+            int offlen = ll2string(offstr, sizeof(offstr), server.primary_repl_offset);
+            char replinfo[256];
+            int rilen = snprintf(replinfo, sizeof(replinfo),
+                                 "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
+                                 server.replid, offlen, offstr);
+            write(rs->fds[0], replinfo, rilen);
+            close(rs->fds[0]);
+
+            serverLog(LL_NOTICE, "UPGRADE.CHANNEL: no primary, sent REPLINFO immediately.");
+            zfree(server.upgrade_recv);
+            server.upgrade_recv = NULL;
+            return;
+        } else {
+            rs->delta_fd = rs->fds[0];
+            rs->delta_phase = 1;
+        }
+    }
+
+    /* Check if delta phase is complete */
+    if (rs->delta_phase && rs->delta_fd >= 0) {
         if (server.primary == NULL || server.primary->querybuf == NULL ||
             sdslen(server.primary->querybuf) == 0) {
-            /* Send UPGRADE.REPLINFO: replid (for PSYNC) + offset (how far we've consumed) */
             const char *replid = server.replid;
             long long offset = server.primary_repl_offset;
 
@@ -915,10 +940,10 @@ void upgradeCron(void) {
                                "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
                                replid, offlen, offstr);
 
-            write(server.upgrade_recv->delta_fd, replinfo, len);
-            close(server.upgrade_recv->delta_fd);
-            server.upgrade_recv->delta_fd = -1;
-            server.upgrade_recv->delta_phase = 0;
+            write(rs->delta_fd, replinfo, len);
+            close(rs->delta_fd);
+            rs->delta_fd = -1;
+            rs->delta_phase = 0;
 
             serverLog(LL_NOTICE, "UPGRADE: delta forwarding complete. Sent REPLINFO replid=%.40s offset=%lld",
                       replid, offset);
