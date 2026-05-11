@@ -1111,6 +1111,7 @@ typedef struct upgradeRecvState {
     int all_done;                    /* Set to 1 when all threads finished */
     int sending;                     /* 1 = sender threads are running */
     upgradeSendWorker *workers;      /* Array of sender worker state */
+    long long snapshot_repl_offset;  /* primary_repl_offset captured at scan start */
     /* Delta forwarding state */
     int delta_fd;                    /* fd kept open for delta forwarding (-1 if none) */
     int delta_phase;                 /* 1 = forwarding delta, 0 = bulk phase or done */

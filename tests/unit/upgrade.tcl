@@ -223,6 +223,15 @@ start_server {tags {"upgrade external:skip"}} {
                 }
             }
 
+            test {3-node: UPGRADE uses partial sync (not full sync)} {
+                # The new_replica should have received the correct replid via REPLINFO
+                # and connected to Primary via partial sync, not a full resync.
+                # Check sync_full on primary: should be 1 (m_replica only), not 2.
+                set stats [$primary info stats]
+                regexp {sync_full:([^\r\n]+)} $stats -> sync_full
+                assert_equal $sync_full 1
+            }
+
             test {3-node: new Primary writes reach new_replica} {
                 # Write new key to Primary
                 $primary set "after_upgrade" "new_value"

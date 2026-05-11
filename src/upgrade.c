@@ -820,6 +820,9 @@ void upgradeChannelCommand(client *c) {
         /* Freeze: pause primary input */
         /* (guard in processInputBuffer handles this via server.upgrade_recv) */
 
+        /* Capture replication offset at scan start for REPLINFO */
+        rs->snapshot_repl_offset = server.primary_repl_offset;
+
         /* Disable rehashing */
         hashtableSetResizePolicy(HASHTABLE_RESIZE_FORBID);
 
@@ -966,13 +969,13 @@ void upgradeCron(void) {
         serverLog(LL_NOTICE, "UPGRADE.CHANNEL: bulk transfer complete. %lld keys, %lld bytes%s. Entering delta phase.",
                   total_keys, total_bytes, had_error ? " (with errors)" : "");
 
-        /* Send REPLINFO on fd[0] and enter delta phase */
+        /* Send REPLINFO on fd[0] or enter delta phase */
         if (server.primary_host == NULL) {
             char offstr[21];
-            int offlen = ll2string(offstr, sizeof(offstr), server.primary_repl_offset);
+            int offlen = ll2string(offstr, sizeof(offstr), rs->snapshot_repl_offset);
             char replinfo[256];
             int rilen = snprintf(replinfo, sizeof(replinfo),
-                                 "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
+                                 "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
                                  server.replid, offlen, offstr);
             write(rs->fds[0], replinfo, rilen);
             close(rs->fds[0]);
@@ -998,7 +1001,7 @@ void upgradeCron(void) {
             int offlen = ll2string(offstr, sizeof(offstr), offset);
             char replinfo[256];
             int len = snprintf(replinfo, sizeof(replinfo),
-                               "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
+                               "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
                                replid, offlen, offstr);
 
             write(rs->delta_fd, replinfo, len);
