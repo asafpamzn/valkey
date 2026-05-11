@@ -69,15 +69,62 @@ static ssize_t upgradeReadLine(int fd, char *buf, size_t maxlen) {
     return (ssize_t)pos;
 }
 
-static int upgradeReadExact(int fd, char *buf, size_t len) {
-    while (len > 0) {
-        ssize_t n = read(fd, buf, len);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            return -1;
+/* ========================== Buffered Reader ========================== */
+
+#define UPGRADE_READ_BUF_SIZE (16 * 1024)
+
+typedef struct upgradeReader {
+    int fd;
+    char buf[UPGRADE_READ_BUF_SIZE];
+    int pos;
+    int len;
+} upgradeReader;
+
+static void upgradeReaderInit(upgradeReader *r, int fd) {
+    r->fd = fd;
+    r->pos = 0;
+    r->len = 0;
+}
+
+static int upgradeReaderFill(upgradeReader *r) {
+    while (1) {
+        ssize_t n = read(r->fd, r->buf, UPGRADE_READ_BUF_SIZE);
+        if (n > 0) {
+            r->pos = 0;
+            r->len = (int)n;
+            return 0;
         }
-        buf += n;
-        len -= n;
+        if (n == 0) return -1;
+        if (errno == EINTR) continue;
+        return -1;
+    }
+}
+
+static ssize_t upgradeBufReadLine(upgradeReader *r, char *buf, size_t maxlen) {
+    size_t pos = 0;
+    while (pos < maxlen - 1) {
+        if (r->pos >= r->len) {
+            if (upgradeReaderFill(r) == -1) return -1;
+        }
+        char c = r->buf[r->pos++];
+        buf[pos++] = c;
+        if (c == '\n') break;
+    }
+    buf[pos] = '\0';
+    return (ssize_t)pos;
+}
+
+static int upgradeBufReadExact(upgradeReader *r, char *buf, size_t len) {
+    while (len > 0) {
+        if (r->pos >= r->len) {
+            if (upgradeReaderFill(r) == -1) return -1;
+        }
+        size_t avail = r->len - r->pos;
+        size_t take = avail < len ? avail : len;
+        memcpy(buf, r->buf + r->pos, take);
+        r->pos += take;
+        buf += take;
+        len -= take;
     }
     return 0;
 }
@@ -204,14 +251,14 @@ typedef struct upgradeRecvThreadArg {
     int *error_flag;
 } upgradeRecvThreadArg;
 
-static sds upgradeRecvReadBulk(int fd, int len) {
+static sds upgradeRecvReadBulk(upgradeReader *r, int len) {
     sds s = sdsnewlen(NULL, len);
-    if (upgradeReadExact(fd, s, len) == -1) {
+    if (upgradeBufReadExact(r, s, len) == -1) {
         sdsfree(s);
         return NULL;
     }
     char crlf[2];
-    if (upgradeReadExact(fd, crlf, 2) == -1) {
+    if (upgradeBufReadExact(r, crlf, 2) == -1) {
         sdsfree(s);
         return NULL;
     }
@@ -220,23 +267,24 @@ static sds upgradeRecvReadBulk(int fd, int len) {
 
 static void *upgradeRecvWorkerMain(void *arg) {
     upgradeRecvThreadArg *targ = (upgradeRecvThreadArg *)arg;
-    int fd = targ->fd;
+    upgradeReader reader;
+    upgradeReaderInit(&reader, targ->fd);
     char linebuf[256];
 
     while (1) {
-        if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
         if (linebuf[0] != '*') { *targ->error_flag = 1; break; }
         int argc = atoi(linebuf + 1);
 
         /* Read command name */
-        if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
         int cmdlen = atoi(linebuf + 1);
         char cmdname[64];
         if (cmdlen >= (int)sizeof(cmdname)) { *targ->error_flag = 1; break; }
-        if (upgradeReadExact(fd, cmdname, cmdlen) == -1) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, cmdname, cmdlen) == -1) { *targ->error_flag = 1; break; }
         cmdname[cmdlen] = '\0';
         char crlf[2];
-        if (upgradeReadExact(fd, crlf, 2) == -1) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, crlf, 2) == -1) { *targ->error_flag = 1; break; }
 
         if (argc == 1 && !strcasecmp(cmdname, "UPGRADE.DONE")) {
             /* Thread 0 continues for delta phase; others exit */
@@ -248,21 +296,21 @@ static void *upgradeRecvWorkerMain(void *arg) {
         /* UPGRADE.REPLINFO <replid> <offset> — end of delta (thread 0 only) */
         if (argc == 3 && !strcasecmp(cmdname, "UPGRADE.REPLINFO")) {
             /* Read replid */
-            if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+            if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
             int replidlen = atoi(linebuf + 1);
             char replidbuf[CONFIG_RUN_ID_SIZE + 1];
-            if (replidlen > CONFIG_RUN_ID_SIZE || upgradeReadExact(fd, replidbuf, replidlen) == -1) { *targ->error_flag = 1; break; }
+            if (replidlen > CONFIG_RUN_ID_SIZE || upgradeBufReadExact(&reader, replidbuf, replidlen) == -1) { *targ->error_flag = 1; break; }
             replidbuf[replidlen] = '\0';
             char crlf_tmp[2];
-            if (upgradeReadExact(fd, crlf_tmp, 2) == -1) { *targ->error_flag = 1; break; }
+            if (upgradeBufReadExact(&reader, crlf_tmp, 2) == -1) { *targ->error_flag = 1; break; }
 
             /* Read offset */
-            if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+            if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
             int offlen = atoi(linebuf + 1);
             char offbuf[32];
-            if (offlen >= (int)sizeof(offbuf) || upgradeReadExact(fd, offbuf, offlen) == -1) { *targ->error_flag = 1; break; }
+            if (offlen >= (int)sizeof(offbuf) || upgradeBufReadExact(&reader, offbuf, offlen) == -1) { *targ->error_flag = 1; break; }
             offbuf[offlen] = '\0';
-            if (upgradeReadExact(fd, crlf_tmp, 2) == -1) { *targ->error_flag = 1; break; }
+            if (upgradeBufReadExact(&reader, crlf_tmp, 2) == -1) { *targ->error_flag = 1; break; }
 
             /* Store replid and offset for PSYNC later */
             memcpy(server.replid, replidbuf, CONFIG_RUN_ID_SIZE + 1);
@@ -279,10 +327,10 @@ static void *upgradeRecvWorkerMain(void *arg) {
             /* For now: read and discard remaining bulk args.
              * The REPLINFO offset will let us PSYNC from Primary to get these. */
             for (int a = 1; a < argc; a++) {
-                if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+                if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
                 int bulklen = atoi(linebuf + 1);
                 if (bulklen >= 0) {
-                    sds discard = upgradeRecvReadBulk(fd, bulklen);
+                    sds discard = upgradeRecvReadBulk(&reader, bulklen);
                     if (discard) sdsfree(discard); else { *targ->error_flag = 1; break; }
                 }
             }
@@ -291,35 +339,35 @@ static void *upgradeRecvWorkerMain(void *arg) {
         }
 
         /* Read key */
-        if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
         int keylen = atoi(linebuf + 1);
-        sds key = upgradeRecvReadBulk(fd, keylen);
+        sds key = upgradeRecvReadBulk(&reader, keylen);
         if (!key) { *targ->error_flag = 1; break; }
 
         /* Read ttl */
-        if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { sdsfree(key); *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { sdsfree(key); *targ->error_flag = 1; break; }
         int ttllen = atoi(linebuf + 1);
         char ttlbuf[32];
         if (ttllen >= (int)sizeof(ttlbuf)) { sdsfree(key); *targ->error_flag = 1; break; }
-        if (upgradeReadExact(fd, ttlbuf, ttllen) == -1) { sdsfree(key); *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, ttlbuf, ttllen) == -1) { sdsfree(key); *targ->error_flag = 1; break; }
         ttlbuf[ttllen] = '\0';
-        if (upgradeReadExact(fd, crlf, 2) == -1) { sdsfree(key); *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, crlf, 2) == -1) { sdsfree(key); *targ->error_flag = 1; break; }
         long long ttl = strtoll(ttlbuf, NULL, 10);
 
         /* Read serialized payload */
-        if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { sdsfree(key); *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { sdsfree(key); *targ->error_flag = 1; break; }
         int datalen = atoi(linebuf + 1);
-        sds data = upgradeRecvReadBulk(fd, datalen);
+        sds data = upgradeRecvReadBulk(&reader, datalen);
         if (!data) { sdsfree(key); *targ->error_flag = 1; break; }
 
         /* Read dbid */
-        if (upgradeReadLine(fd, linebuf, sizeof(linebuf)) <= 0) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
         int dbidlen = atoi(linebuf + 1);
         char dbidbuf[16];
         if (dbidlen >= (int)sizeof(dbidbuf)) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
-        if (upgradeReadExact(fd, dbidbuf, dbidlen) == -1) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, dbidbuf, dbidlen) == -1) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
         dbidbuf[dbidlen] = '\0';
-        if (upgradeReadExact(fd, crlf, 2) == -1) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, crlf, 2) == -1) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
         int dbid = atoi(dbidbuf);
 
         if (dbid < 0 || dbid >= server.dbnum || server.db[dbid] == NULL) {
