@@ -38,6 +38,7 @@
  */
 
 #include "server.h"
+#include "monotonic.h"
 #include "cluster.h"
 #include "cluster_legacy.h"
 #include "connection.h"
@@ -247,12 +248,46 @@ static void dollyResetClusterIdentity(void) {
     serverLog(LL_WARNING, DOLLY_LOG_PREFIX " cluster reset complete, new node ID %.40s", me->name);
 }
 
+static void dollyResetTimers(void) {
+    serverLog(LL_WARNING, DOLLY_LOG_PREFIX " rebasing event loop timers to current monotonic clock");
+
+    monotime now = getMonotonicUs();
+    aeTimeEvent *te = server.el->timeEventHead;
+    int count = 0;
+
+    while (te) {
+        if (te->id != AE_DELETED_EVENT_ID && te->when > now) {
+            te->when = now;
+            count++;
+        }
+        te = te->next;
+    }
+
+    serverLog(LL_WARNING, DOLLY_LOG_PREFIX " rebased %d time event(s) to fire immediately", count);
+
+    /* Reset instantaneous metric sampling state so the first serverCron
+     * iteration after restore doesn't compute a bogus rate from the stale
+     * last_sample_base (which used the source machine's monotonic clock). */
+    for (int i = 0; i < STATS_METRIC_COUNT; i++) {
+        server.inst_metric[i].last_sample_base = 0;
+        server.inst_metric[i].last_sample_value = 0;
+        memset(server.inst_metric[i].samples, 0, sizeof(server.inst_metric[i].samples));
+        server.inst_metric[i].idx = 0;
+    }
+
+    /* Reset stale monotonic timestamps that would corrupt INFO stats. */
+    server.stat_last_eviction_exceeded_time = 0;
+    server.stat_last_active_defrag_time = 0;
+    server.stat_current_cow_updated = 0;
+}
+
 void cleanStateForDollySaveCommand(client *c) {
     serverLog(LL_WARNING, DOLLY_LOG_PREFIX " starting clean-state for CRIU migration");
 
     dollyResetRuntimeIdentity();
     dollyResetReplicationIdentity();
     dollyResetClusterIdentity();
+    dollyResetTimers();
 
     serverLog(LL_WARNING, DOLLY_LOG_PREFIX " complete");
     addReply(c, shared.ok);
