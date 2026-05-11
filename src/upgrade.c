@@ -199,6 +199,7 @@ typedef struct upgradeRecvThreadArg {
     int fd;
     int thread_id;
     long long *keys_inserted;
+    long long *keys_per_db;  /* Array of size server.dbnum — per-db counts */
     int *done_flag;
     int *error_flag;
 } upgradeRecvThreadArg;
@@ -352,6 +353,7 @@ static void *upgradeRecvWorkerMain(void *arg) {
 
         if (kvstoreHashtableAdd(db->keys, dict_index, obj)) {
             (*targ->keys_inserted)++;
+            targ->keys_per_db[dbid]++;
         } else {
             decrRefCount(obj);
         }
@@ -569,14 +571,17 @@ void upgradeCommand(client *c) {
     /* Spawn receiver threads */
     pthread_t *threads = zmalloc(sizeof(pthread_t) * num_threads);
     long long *keys_inserted = zcalloc(sizeof(long long) * num_threads);
+    long long **keys_per_db = zmalloc(sizeof(long long *) * num_threads);
     int *thread_done = zcalloc(sizeof(int) * num_threads);
     int *thread_error = zcalloc(sizeof(int) * num_threads);
 
     for (int i = 0; i < num_threads; i++) {
+        keys_per_db[i] = zcalloc(sizeof(long long) * server.dbnum);
         upgradeRecvThreadArg *arg = zmalloc(sizeof(upgradeRecvThreadArg));
         arg->fd = fds[i];
         arg->thread_id = i;
         arg->keys_inserted = &keys_inserted[i];
+        arg->keys_per_db = keys_per_db[i];
         arg->done_flag = &thread_done[i];
         arg->error_flag = &thread_error[i];
 
@@ -599,6 +604,16 @@ void upgradeCommand(client *c) {
         if (thread_error[i] && i != 0) had_error = 1;
     }
 
+    /* Aggregate per-db counts across all threads */
+    long long *db_key_counts = zcalloc(sizeof(long long) * server.dbnum);
+    for (int i = 0; i < num_threads; i++) {
+        for (int d = 0; d < server.dbnum; d++) {
+            db_key_counts[d] += keys_per_db[i][d];
+        }
+        zfree(keys_per_db[i]);
+    }
+    zfree(keys_per_db);
+
     /* Close connections and free arrays */
     for (int i = 0; i < num_threads; i++) {
         close(fds[i]);
@@ -615,18 +630,16 @@ void upgradeCommand(client *c) {
     server.upgrade->keys_transferred = total_keys;
     server.dirty += total_keys;
 
-    /* Finalize: fix ht->used[0] (racy from concurrent threads) and register expires.
-     * All keys are inserted correctly — only the counter may be off. */
+    /* Fix ht->used[0] for each db (racy from concurrent thread increments) */
     for (int dbid = 0; dbid < server.dbnum; dbid++) {
+        if (db_key_counts[dbid] == 0) continue;
         serverDb *db = server.db[dbid];
         if (db == NULL) continue;
         hashtable *ht = kvstoreGetHashtable(db->keys, 0);
         if (ht == NULL) continue;
-
-        /* Fix the used count to total_keys (authoritative from thread counters) */
-        hashtableSetUsedCount(ht, total_keys);
-        break;  /* In standalone mode, all keys are in db[0] dict_index 0 */
+        hashtableSetUsedCount(ht, db_key_counts[dbid]);
     }
+    zfree(db_key_counts);
 
     /* Register expires */
     for (int dbid = 0; dbid < server.dbnum; dbid++) {
