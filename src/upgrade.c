@@ -655,6 +655,15 @@ void upgradeCommand(client *c) {
               total_keys, mstime() - server.upgrade->start_time,
               server.replid, (long long)server.primary_repl_offset);
 
+    /* Set up replication to Primary using the replid+offset from REPLINFO.
+     * replicationCachePrimaryUsingMyself() creates a cached_primary with our
+     * current server.replid and server.primary_repl_offset, which will be used
+     * by PSYNC when connecting to Primary. */
+    replicationCachePrimaryUsingMyself();
+    replicationSetPrimary(p_host, p_port, 0, false);
+    serverLog(LL_NOTICE, "UPGRADE: REPLICAOF %s:%d configured. Will PSYNC with replid=%.40s offset=%lld.",
+              p_host, p_port, server.replid, (long long)server.primary_repl_offset);
+
     server.upgrade->state = UPGRADE_STATE_DONE;
 
     addReply(c, shared.ok);
@@ -796,12 +805,12 @@ void upgradeChannelCommand(client *c) {
         /* Send REPLINFO on fd[0] and enter delta phase */
         if (server.primary_host == NULL) {
             /* No Primary connected — no delta to forward. Send REPLINFO immediately. */
+            char offstr[21];
+            int offlen = ll2string(offstr, sizeof(offstr), server.primary_repl_offset);
             char replinfo[256];
             int rilen = snprintf(replinfo, sizeof(replinfo),
-                                 "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%lld\r\n",
-                                 server.replid,
-                                 (int)snprintf(NULL, 0, "%lld", (long long)server.primary_repl_offset),
-                                 (long long)server.primary_repl_offset);
+                                 "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
+                                 server.replid, offlen, offstr);
             write(rs->fds[0], replinfo, rilen);
             close(rs->fds[0]);
 
@@ -894,33 +903,25 @@ void upgradeCron(void) {
         /* Delta is done when primary querybuf is fully processed */
         if (server.primary == NULL || server.primary->querybuf == NULL ||
             sdslen(server.primary->querybuf) == 0) {
-            /* Send UPGRADE.REPLINFO with replid and offset */
-            char replinfo[256];
+            /* Send UPGRADE.REPLINFO: replid (for PSYNC) + offset (how far we've consumed) */
             const char *replid = server.replid;
-            long long offset = server.primary ? server.primary->repl_data->reploff : server.primary_repl_offset;
+            long long offset = server.primary_repl_offset;
+
+            char offstr[21];
+            int offlen = ll2string(offstr, sizeof(offstr), offset);
+            char replinfo[256];
             int len = snprintf(replinfo, sizeof(replinfo),
-                               "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$%d\r\n%s\r\n$%lld\r\n%lld\r\n",
-                               (int)strlen(replid), replid,
-                               (long long)snprintf(NULL, 0, "%lld", offset), offset);
-            /* Simpler RESP format */
-            len = snprintf(replinfo, sizeof(replinfo),
-                           "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%s\r\n",
-                           replid);
-            /* Actually let's use a very simple format: just the command with inline args */
-            len = snprintf(replinfo, sizeof(replinfo),
-                           "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%lld\r\n",
-                           replid,
-                           (int)snprintf(NULL, 0, "%lld", offset), offset);
+                               "*3\r\n$15\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
+                               replid, offlen, offstr);
 
             write(server.upgrade_recv->delta_fd, replinfo, len);
             close(server.upgrade_recv->delta_fd);
             server.upgrade_recv->delta_fd = -1;
             server.upgrade_recv->delta_phase = 0;
 
-            serverLog(LL_NOTICE, "UPGRADE: delta forwarding complete. Sent REPLINFO replid=%s offset=%lld",
+            serverLog(LL_NOTICE, "UPGRADE: delta forwarding complete. Sent REPLINFO replid=%.40s offset=%lld",
                       replid, offset);
 
-            /* Clean up upgrade_recv state */
             zfree(server.upgrade_recv);
             server.upgrade_recv = NULL;
         }
