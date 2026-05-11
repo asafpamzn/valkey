@@ -1094,9 +1094,10 @@ typedef struct replDataBuf {
 #define UPGRADE_STATE_PAUSED     6
 
 #define UPGRADE_KEYS_PER_CYCLE   1000
-#define UPGRADE_MAX_THREADS      10
+#define UPGRADE_DEFAULT_THREADS  10
+#define UPGRADE_MAX_THREADS      64
 
-/* Receiver state (on new_replica side) for parallel insertion */
+/* State on m_replica side for serving UPGRADE channels */
 typedef struct upgradeRecvState {
     int total_threads;
     int channels_registered;         /* How many UPGRADE.CHANNEL have arrived */
@@ -1107,6 +1108,9 @@ typedef struct upgradeRecvState {
     int thread_done[UPGRADE_MAX_THREADS];
     int thread_error[UPGRADE_MAX_THREADS];
     int all_done;                    /* Set to 1 when all threads finished */
+    /* Delta forwarding state */
+    int delta_fd;                    /* fd kept open for delta forwarding (-1 if none) */
+    int delta_phase;                 /* 1 = forwarding delta, 0 = bulk phase or done */
 } upgradeRecvState;
 
 typedef struct upgradeState {
@@ -4170,6 +4174,7 @@ void upgradeCommand(client *c);
 void upgradeRestoreCommand(client *c);
 void upgradeChannelCommand(client *c);
 void upgradeDoneCommand(client *c);
+void upgradeInitCommand(client *c);
 void upgradeInit(void);
 void upgradeFree(void);
 void upgradeCron(void);

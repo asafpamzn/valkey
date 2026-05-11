@@ -2165,6 +2165,12 @@ size_t hashtableNumBuckets(hashtable *ht) {
     return numBuckets(ht->bucket_exp[0]);
 }
 
+/* Override the used count for table[0]. Used after parallel bulk insertion
+ * where the counter may be inaccurate due to concurrent increments. */
+void hashtableSetUsedCount(hashtable *ht, size_t count) {
+    ht->used[0] = count;
+}
+
 /* --- Iterator --- */
 
 /* Initialize an iterator for a hashtable.
