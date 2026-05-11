@@ -340,14 +340,15 @@ static void *upgradeRecvWorkerMain(void *arg) {
         robj *obj = rdbLoadObject(type, &payload, key, dbid, NULL, RDBFLAGS_NONE, 0);
         if (obj == NULL) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
 
-        /* Direct insert into pre-sized hashtable (no kvstore overhead) */
+        /* Insert into pre-sized hashtable via kvstoreHashtableAdd.
+         * This updates kvs metadata (key_count, non_empty_hashtables).
+         * The ht->used[0]++ race is fixed post-join by hashtableSetUsedCount(). */
         serverDb *db = server.db[dbid];
         int dict_index = server.cluster_enabled ? getKeySlot(key) : 0;
         obj = objectSetKeyAndExpire(obj, key, ttl > 0 ? ttl : -1);
         initObjectLRUOrLFU(obj);
 
-        hashtable *ht = kvstoreGetHashtable(db->keys, dict_index);
-        if (ht && hashtableAdd(ht, obj)) {
+        if (kvstoreHashtableAdd(db->keys, dict_index, obj)) {
             (*targ->keys_inserted)++;
         } else {
             decrRefCount(obj);
