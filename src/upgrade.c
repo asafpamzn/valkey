@@ -246,6 +246,7 @@ typedef struct upgradeRecvThreadArg {
     int fd;
     int thread_id;
     long long *keys_inserted;
+    long long *bytes_received;
     long long *keys_per_db;  /* Array of size server.dbnum — per-db counts */
     int *done_flag;
     int *error_flag;
@@ -401,6 +402,7 @@ static void *upgradeRecvWorkerMain(void *arg) {
 
         if (kvstoreHashtableAdd(db->keys, dict_index, obj)) {
             (*targ->keys_inserted)++;
+            (*targ->bytes_received) += sdslen(data);
             targ->keys_per_db[dbid]++;
         } else {
             decrRefCount(obj);
@@ -619,6 +621,7 @@ void upgradeCommand(client *c) {
     /* Spawn receiver threads */
     pthread_t *threads = zmalloc(sizeof(pthread_t) * num_threads);
     long long *keys_inserted = zcalloc(sizeof(long long) * num_threads);
+    long long *bytes_received = zcalloc(sizeof(long long) * num_threads);
     long long **keys_per_db = zmalloc(sizeof(long long *) * num_threads);
     int *thread_done = zcalloc(sizeof(int) * num_threads);
     int *thread_error = zcalloc(sizeof(int) * num_threads);
@@ -629,6 +632,7 @@ void upgradeCommand(client *c) {
         arg->fd = fds[i];
         arg->thread_id = i;
         arg->keys_inserted = &keys_inserted[i];
+        arg->bytes_received = &bytes_received[i];
         arg->keys_per_db = keys_per_db[i];
         arg->done_flag = &thread_done[i];
         arg->error_flag = &thread_error[i];
@@ -643,10 +647,12 @@ void upgradeCommand(client *c) {
 
     /* Wait for all threads */
     long long total_keys = 0;
+    long long total_bytes = 0;
     int had_error = 0;
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
         total_keys += keys_inserted[i];
+        total_bytes += bytes_received[i];
         /* Thread 0 may report "error" if REPLINFO read fails (race with close).
          * Only treat as real error if it also inserted 0 keys. */
         if (thread_error[i] && i != 0) had_error = 1;
@@ -669,6 +675,7 @@ void upgradeCommand(client *c) {
     zfree(fds);
     zfree(threads);
     zfree(keys_inserted);
+    zfree(bytes_received);
     zfree(thread_done);
     zfree(thread_error);
 
@@ -676,6 +683,7 @@ void upgradeCommand(client *c) {
     hashtableSetResizePolicy(HASHTABLE_RESIZE_ALLOW);
 
     server.upgrade->keys_transferred = total_keys;
+    server.upgrade->bytes_transferred = total_bytes;
     server.dirty += total_keys;
 
     /* Fix ht->used[0] for each db (racy from concurrent thread increments) */
