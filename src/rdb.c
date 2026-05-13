@@ -421,24 +421,32 @@ writeerr:
     return -1;
 }
 
+static __thread void *lzf_thread_buffer = NULL;
+
 ssize_t rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
     size_t comprlen, outlen;
     void *out;
-    static void *buffer = NULL;
 
     /* We require at least four bytes compression for this to be worth it */
     if (len <= 4) return 0;
     outlen = len - 4;
     if (outlen < LZF_STATIC_BUFFER_SIZE) {
-        if (!buffer) buffer = zmalloc(LZF_STATIC_BUFFER_SIZE);
-        out = buffer;
+        if (!lzf_thread_buffer) lzf_thread_buffer = zmalloc(LZF_STATIC_BUFFER_SIZE);
+        out = lzf_thread_buffer;
     } else {
         if ((out = zmalloc(outlen + 1)) == NULL) return 0;
     }
     comprlen = lzf_compress(s, len, out, outlen);
     ssize_t nwritten = comprlen ? rdbSaveLzfBlob(rdb, out, comprlen, len) : 0;
-    if (out != buffer) zfree(out);
+    if (out != lzf_thread_buffer) zfree(out);
     return nwritten;
+}
+
+void rdbFreeLzfThreadBuffer(void) {
+    if (lzf_thread_buffer) {
+        zfree(lzf_thread_buffer);
+        lzf_thread_buffer = NULL;
+    }
 }
 
 /* Load an LZF compressed string in RDB format. The returned value

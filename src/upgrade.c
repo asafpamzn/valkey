@@ -159,10 +159,8 @@ static int upgradeSendKey(int fd, sds keyname, long long ttl, sds serialized, in
     *sendbuf = sdscatlen(*sendbuf, dbidstr, dbidlen);
     *sendbuf = sdscatlen(*sendbuf, "\r\n", 2);
 
-    if (sdslen(*sendbuf) >= UPGRADE_SEND_BUF_SIZE) {
-        if (upgradeWriteAll(fd, *sendbuf, sdslen(*sendbuf)) == -1) return -1;
-        sdsclear(*sendbuf);
-    }
+    if (upgradeWriteAll(fd, *sendbuf, sdslen(*sendbuf)) == -1) return -1;
+    sdsclear(*sendbuf);
     return 0;
 }
 
@@ -216,6 +214,11 @@ static void *upgradeSendWorkerMain(void *arg) {
         hashtable *ht = kvstoreGetHashtable(db->keys, 0);
         if (ht == NULL || hashtableSize(ht) == 0) continue;
 
+        if (w->thread_id == 0) {
+            serverLog(LL_NOTICE, "UPGRADE sender[0]: db%d has %zu keys, %zu buckets",
+                      dbid, hashtableSize(ht), hashtableNumBuckets(ht));
+        }
+
         ctx.dbid = dbid;
         hashtableIterateBucketRange(ht, w->total_threads, w->thread_id,
                                     upgradeSendEntryCallback, &ctx);
@@ -236,6 +239,7 @@ static void *upgradeSendWorkerMain(void *arg) {
             w->error = 1;
         }
     }
+    rdbFreeLzfThreadBuffer();
     atomic_store_explicit((_Atomic int *)&w->done, 1, memory_order_release);
     return NULL;
 }
@@ -250,6 +254,7 @@ typedef struct upgradeRecvThreadArg {
     long long *keys_per_db;  /* Array of size server.dbnum — per-db counts */
     int *done_flag;
     int *error_flag;
+    pthread_mutex_t *insert_mutex;
 } upgradeRecvThreadArg;
 
 static sds upgradeRecvReadBulk(upgradeReader *r, int len) {
@@ -273,19 +278,19 @@ static void *upgradeRecvWorkerMain(void *arg) {
     char linebuf[256];
 
     while (1) {
-        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
-        if (linebuf[0] != '*') { *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { serverLog(LL_WARNING, "UPGRADE recv thread %d: readLine argc failed", targ->thread_id); *targ->error_flag = 1; break; }
+        if (linebuf[0] != '*') { serverLog(LL_WARNING, "UPGRADE recv thread %d: expected '*', got '%c' (0x%02x), line='%.40s'", targ->thread_id, linebuf[0], (unsigned char)linebuf[0], linebuf); *targ->error_flag = 1; break; }
         int argc = atoi(linebuf + 1);
 
         /* Read command name */
-        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { serverLog(LL_WARNING, "UPGRADE recv thread %d: readLine cmdlen failed", targ->thread_id); *targ->error_flag = 1; break; }
         int cmdlen = atoi(linebuf + 1);
         char cmdname[64];
-        if (cmdlen >= (int)sizeof(cmdname)) { *targ->error_flag = 1; break; }
-        if (upgradeBufReadExact(&reader, cmdname, cmdlen) == -1) { *targ->error_flag = 1; break; }
+        if (cmdlen >= (int)sizeof(cmdname)) { serverLog(LL_WARNING, "UPGRADE recv thread %d: cmdlen %d >= 64", targ->thread_id, cmdlen); *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, cmdname, cmdlen) == -1) { serverLog(LL_WARNING, "UPGRADE recv thread %d: readExact cmdname failed", targ->thread_id); *targ->error_flag = 1; break; }
         cmdname[cmdlen] = '\0';
         char crlf[2];
-        if (upgradeBufReadExact(&reader, crlf, 2) == -1) { *targ->error_flag = 1; break; }
+        if (upgradeBufReadExact(&reader, crlf, 2) == -1) { serverLog(LL_WARNING, "UPGRADE recv thread %d: readExact crlf failed", targ->thread_id); *targ->error_flag = 1; break; }
 
         if (argc == 1 && !strcasecmp(cmdname, "UPGRADE.DONE")) {
             /* Thread 0 continues for delta phase; others exit */
@@ -322,11 +327,7 @@ static void *upgradeRecvWorkerMain(void *arg) {
         }
 
         if (argc != 5 || strcasecmp(cmdname, "UPGRADE.RESTORE") != 0) {
-            /* Delta phase: raw RESP commands from Primary (SET, DEL, etc.)
-             * Read all bulk args and apply as a command on new_replica.
-             * We accumulate into a buffer; the main thread will process it later. */
-            /* For now: read and discard remaining bulk args.
-             * The REPLINFO offset will let us PSYNC from Primary to get these. */
+            /* Delta phase: raw RESP commands from Primary (SET, DEL, etc.) */
             for (int a = 1; a < argc; a++) {
                 if (upgradeBufReadLine(&reader, linebuf, sizeof(linebuf)) <= 0) { *targ->error_flag = 1; break; }
                 int bulklen = atoi(linebuf + 1);
@@ -379,6 +380,8 @@ static void *upgradeRecvWorkerMain(void *arg) {
         /* Verify and deserialize */
         uint16_t rdbver;
         if (verifyDumpPayload((unsigned char *)data, sdslen(data), &rdbver) == C_ERR) {
+            serverLog(LL_WARNING, "UPGRADE recv thread %d: verifyDumpPayload failed for key '%.40s' datalen=%zu",
+                      targ->thread_id, key, sdslen(data));
             sdsfree(key); sdsfree(data);
             *targ->error_flag = 1;
             break;
@@ -387,19 +390,18 @@ static void *upgradeRecvWorkerMain(void *arg) {
         rio payload;
         rioInitWithBuffer(&payload, data);
         int type = rdbLoadObjectType(&payload);
-        if (type == -1) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
+        if (type == -1) { serverLog(LL_WARNING, "UPGRADE recv thread %d: rdbLoadObjectType failed for key '%.40s' datalen=%zu", targ->thread_id, key, sdslen(data)); sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
 
-        robj *obj = rdbLoadObject(type, &payload, key, dbid, NULL, RDBFLAGS_NONE, 0);
-        if (obj == NULL) { sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
+        int rdb_error = 0;
+        robj *obj = rdbLoadObject(type, &payload, key, dbid, &rdb_error, RDBFLAGS_NONE, 0);
+        if (obj == NULL) { serverLog(LL_WARNING, "UPGRADE recv thread %d: rdbLoadObject failed for key '%.40s' type=%d datalen=%zu rdb_error=%d", targ->thread_id, key, type, sdslen(data), rdb_error); sdsfree(key); sdsfree(data); *targ->error_flag = 1; break; }
 
-        /* Insert into pre-sized hashtable via kvstoreHashtableAdd.
-         * This updates kvs metadata (key_count, non_empty_hashtables).
-         * The ht->used[0]++ race is fixed post-join by hashtableSetUsedCount(). */
         serverDb *db = server.db[dbid];
         int dict_index = server.cluster_enabled ? getKeySlot(key) : 0;
         obj = objectSetKeyAndExpire(obj, key, ttl > 0 ? ttl : -1);
         initObjectLRUOrLFU(obj);
 
+        pthread_mutex_lock(targ->insert_mutex);
         if (kvstoreHashtableAdd(db->keys, dict_index, obj)) {
             (*targ->keys_inserted)++;
             (*targ->bytes_received) += sdslen(data);
@@ -407,6 +409,7 @@ static void *upgradeRecvWorkerMain(void *arg) {
         } else {
             decrRefCount(obj);
         }
+        pthread_mutex_unlock(targ->insert_mutex);
 
         sdsfree(key);
         sdsfree(data);
@@ -618,6 +621,15 @@ void upgradeCommand(client *c) {
     /* Disable rehashing on receiver */
     hashtableSetResizePolicy(HASHTABLE_RESIZE_FORBID);
 
+    /* Force-initialize the crc64 combine cache before spawning threads.
+     * crc64_combine uses a lazily-initialized static table that is not
+     * thread-safe. Computing a CRC over >1024 bytes triggers initialization. */
+    {
+        char dummy[2048];
+        memset(dummy, 0, sizeof(dummy));
+        crc64(0, (unsigned char *)dummy, sizeof(dummy));
+    }
+
     /* Spawn receiver threads */
     pthread_t *threads = zmalloc(sizeof(pthread_t) * num_threads);
     long long *keys_inserted = zcalloc(sizeof(long long) * num_threads);
@@ -625,6 +637,7 @@ void upgradeCommand(client *c) {
     long long **keys_per_db = zmalloc(sizeof(long long *) * num_threads);
     int *thread_done = zcalloc(sizeof(int) * num_threads);
     int *thread_error = zcalloc(sizeof(int) * num_threads);
+    pthread_mutex_t insert_mutex = PTHREAD_MUTEX_INITIALIZER;
 
     for (int i = 0; i < num_threads; i++) {
         keys_per_db[i] = zcalloc(sizeof(long long) * server.dbnum);
@@ -636,6 +649,7 @@ void upgradeCommand(client *c) {
         arg->keys_per_db = keys_per_db[i];
         arg->done_flag = &thread_done[i];
         arg->error_flag = &thread_error[i];
+        arg->insert_mutex = &insert_mutex;
 
         if (pthread_create(&threads[i], NULL, upgradeRecvWorkerMain, arg) != 0) {
             serverLog(LL_WARNING, "UPGRADE: pthread_create failed for thread %d", i);
@@ -657,6 +671,7 @@ void upgradeCommand(client *c) {
          * Only treat as real error if it also inserted 0 keys. */
         if (thread_error[i] && i != 0) had_error = 1;
     }
+    pthread_mutex_destroy(&insert_mutex);
 
     /* Aggregate per-db counts across all threads */
     long long *db_key_counts = zcalloc(sizeof(long long) * server.dbnum);
@@ -800,30 +815,23 @@ void upgradeChannelCommand(client *c) {
         return;
     }
 
-    /* Store fd and client */
-    int dupfd = dup(c->conn->fd);
-    if (dupfd == -1) {
-        addReplyError(c, "dup() failed");
-        return;
-    }
-    rs->fds[thread_id] = dupfd;
+    /* Store fd — we'll use the original fd directly (no dup) */
+    rs->fds[thread_id] = c->conn->fd;
     rs->clients[thread_id] = c;
     rs->channels_registered++;
 
-    /* Reply OK */
-    addReply(c, shared.ok);
+    /* Reply OK immediately via direct write (bypass buffered I/O) */
+    const char *ok_reply = "+OK\r\n";
+    write(c->conn->fd, ok_reply, 5);
 
-    /* Disable event loop reading on this fd */
+    /* Disable event loop on this client — prevent any further I/O */
     connSetReadHandler(c->conn, NULL);
+    connSetWriteHandler(c->conn, NULL);
+    c->flag.pending_write = 0;
 
     /* If all channels registered, start sending */
     if (rs->channels_registered == rs->total_threads) {
         serverLog(LL_NOTICE, "UPGRADE.CHANNEL: all %d channels registered. Freezing and sending.", rs->total_threads);
-
-        /* Flush +OK replies to all channel clients before we block */
-        for (int i = 0; i < rs->total_threads; i++) {
-            if (rs->clients[i]) writeToClient(rs->clients[i]);
-        }
 
         /* Freeze: pause primary input */
         /* (guard in processInputBuffer handles this via server.upgrade_recv) */
@@ -831,16 +839,30 @@ void upgradeChannelCommand(client *c) {
         /* Capture replication offset at scan start for REPLINFO */
         rs->snapshot_repl_offset = server.primary_repl_offset;
 
-        /* Disable rehashing */
+        /* Disable rehashing during threaded scan.
+         * Also set dict_resizing=0 to prevent serverCron's updateDictResizePolicy()
+         * from re-enabling rehashing while sender threads iterate the hashtable. */
+        server.dict_resizing = 0;
         hashtableSetResizePolicy(HASHTABLE_RESIZE_FORBID);
 
-        /* Make fds blocking */
+        /* Make fds blocking and disable Nagle */
         char err[ANET_ERR_LEN];
         for (int i = 0; i < rs->total_threads; i++) {
             anetBlock(err, rs->fds[i]);
+            anetEnableTcpNoDelay(err, rs->fds[i]);
         }
 
-        /* Spawn sender threads (non-blocking — cron will join them) */
+        /* Force-initialize the crc64 combine cache before spawning threads.
+         * crc64_combine uses a lazily-initialized static table that is not
+         * thread-safe. Computing a CRC over >1024 bytes triggers the dual-split
+         * path which calls crc64_combine, initializing the cache. */
+        {
+            char dummy[2048];
+            memset(dummy, 0, sizeof(dummy));
+            crc64(0, (unsigned char *)dummy, sizeof(dummy));
+        }
+
+        /* Spawn sender threads */
         upgradeSendWorker *workers = zcalloc(sizeof(upgradeSendWorker) * rs->total_threads);
         for (int i = 0; i < rs->total_threads; i++) {
             workers[i].thread_id = i;
@@ -851,9 +873,13 @@ void upgradeChannelCommand(client *c) {
         rs->workers = workers;
         rs->sending = 1;
 
+        pthread_attr_t tattr;
+        pthread_attr_init(&tattr);
+        pthread_attr_setstacksize(&tattr, 1 << 21); /* 2MB */
         for (int i = 0; i < rs->total_threads; i++) {
-            pthread_create(&workers[i].thread, NULL, upgradeSendWorkerMain, &workers[i]);
+            pthread_create(&workers[i].thread, &tattr, upgradeSendWorkerMain, &workers[i]);
         }
+        pthread_attr_destroy(&tattr);
 
         serverLog(LL_NOTICE, "UPGRADE.CHANNEL: sender threads launched. Event loop continues.");
     }
@@ -963,15 +989,19 @@ void upgradeCron(void) {
             }
         }
 
-        /* Close dupped fds except fd[0] which we keep for delta forwarding */
+        /* Free channel clients (except client[0] which we keep for delta/REPLINFO) */
         for (int i = 1; i < rs->total_threads; i++) {
-            close(rs->fds[i]);
+            if (rs->clients[i]) {
+                freeClientAsync(rs->clients[i]);
+                rs->clients[i] = NULL;
+            }
         }
         zfree(rs->workers);
         rs->workers = NULL;
         rs->sending = 0;
 
         /* Re-enable rehashing */
+        server.dict_resizing = 1;
         hashtableSetResizePolicy(HASHTABLE_RESIZE_ALLOW);
 
         serverLog(LL_NOTICE, "UPGRADE.CHANNEL: bulk transfer complete. %lld keys, %lld bytes%s. Entering delta phase.",
@@ -986,7 +1016,10 @@ void upgradeCron(void) {
                                  "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
                                  server.replid, offlen, offstr);
             write(rs->fds[0], replinfo, rilen);
-            close(rs->fds[0]);
+            if (rs->clients[0]) {
+                freeClientAsync(rs->clients[0]);
+                rs->clients[0] = NULL;
+            }
 
             serverLog(LL_NOTICE, "UPGRADE.CHANNEL: no primary, sent REPLINFO immediately.");
             zfree(server.upgrade_recv);
@@ -998,31 +1031,33 @@ void upgradeCron(void) {
         }
     }
 
-    /* Check if delta phase is complete */
+    /* Delta phase: send REPLINFO with snapshot offset so new_replica PSYNCs
+     * from the point the scan started. This is correct because the scan
+     * captured the m_replica's state at snapshot_repl_offset. */
     if (rs->delta_phase && rs->delta_fd >= 0) {
-        if (server.primary == NULL || server.primary->querybuf == NULL ||
-            sdslen(server.primary->querybuf) == 0) {
-            const char *replid = server.replid;
-            long long offset = server.primary_repl_offset;
+        const char *replid = server.replid;
+        long long offset = rs->snapshot_repl_offset;
 
-            char offstr[21];
-            int offlen = ll2string(offstr, sizeof(offstr), offset);
-            char replinfo[256];
-            int len = snprintf(replinfo, sizeof(replinfo),
-                               "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
-                               replid, offlen, offstr);
+        char offstr[21];
+        int offlen = ll2string(offstr, sizeof(offstr), offset);
+        char replinfo[256];
+        int len = snprintf(replinfo, sizeof(replinfo),
+                           "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
+                           replid, offlen, offstr);
 
-            write(rs->delta_fd, replinfo, len);
-            close(rs->delta_fd);
-            rs->delta_fd = -1;
-            rs->delta_phase = 0;
-
-            serverLog(LL_NOTICE, "UPGRADE: delta forwarding complete. Sent REPLINFO replid=%.40s offset=%lld",
-                      replid, offset);
-
-            zfree(server.upgrade_recv);
-            server.upgrade_recv = NULL;
+        write(rs->delta_fd, replinfo, len);
+        if (rs->clients[0]) {
+            freeClientAsync(rs->clients[0]);
+            rs->clients[0] = NULL;
         }
+        rs->delta_fd = -1;
+        rs->delta_phase = 0;
+
+        serverLog(LL_NOTICE, "UPGRADE: sent REPLINFO replid=%.40s offset=%lld",
+                  replid, offset);
+
+        zfree(server.upgrade_recv);
+        server.upgrade_recv = NULL;
     }
 }
 
