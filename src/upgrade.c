@@ -2,7 +2,6 @@
 #include "rdb.h"
 #include "anet.h"
 #include <pthread.h>
-#include <poll.h>
 
 /* Forward declaration from cluster.c */
 void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
@@ -40,33 +39,20 @@ static const char *upgradeStateStr(int state) {
 
 /* ========================== Low-level I/O ========================== */
 
-static int upgradeWriteAll(int fd, const char *buf, size_t len) {
+#define UPGRADE_IO_TIMEOUT 30000 /* 30 seconds for thread I/O */
+
+static int upgradeWriteAll(connection *conn, const char *buf, size_t len) {
     while (len > 0) {
-        ssize_t n = write(fd, buf, len);
-        if (n <= 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
+        ssize_t n = connSyncWrite(conn, (char *)buf, len, UPGRADE_IO_TIMEOUT);
+        if (n <= 0) return -1;
         buf += n;
         len -= n;
     }
     return 0;
 }
 
-static ssize_t upgradeReadLine(int fd, char *buf, size_t maxlen) {
-    size_t pos = 0;
-    while (pos < maxlen - 1) {
-        char c;
-        ssize_t n = read(fd, &c, 1);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            return -1;
-        }
-        buf[pos++] = c;
-        if (c == '\n') break;
-    }
-    buf[pos] = '\0';
-    return (ssize_t)pos;
+static ssize_t upgradeReadLine(connection *conn, char *buf, size_t maxlen) {
+    return connSyncReadLine(conn, buf, maxlen, UPGRADE_IO_TIMEOUT);
 }
 
 /* ========================== Buffered Reader ========================== */
@@ -74,30 +60,24 @@ static ssize_t upgradeReadLine(int fd, char *buf, size_t maxlen) {
 #define UPGRADE_READ_BUF_SIZE (16 * 1024)
 
 typedef struct upgradeReader {
-    int fd;
+    connection *conn;
     char buf[UPGRADE_READ_BUF_SIZE];
     int pos;
     int len;
 } upgradeReader;
 
-static void upgradeReaderInit(upgradeReader *r, int fd) {
-    r->fd = fd;
+static void upgradeReaderInit(upgradeReader *r, connection *conn) {
+    r->conn = conn;
     r->pos = 0;
     r->len = 0;
 }
 
 static int upgradeReaderFill(upgradeReader *r) {
-    while (1) {
-        ssize_t n = read(r->fd, r->buf, UPGRADE_READ_BUF_SIZE);
-        if (n > 0) {
-            r->pos = 0;
-            r->len = (int)n;
-            return 0;
-        }
-        if (n == 0) return -1;
-        if (errno == EINTR) continue;
-        return -1;
-    }
+    int n = connRead(r->conn, r->buf, UPGRADE_READ_BUF_SIZE);
+    if (n <= 0) return -1;
+    r->pos = 0;
+    r->len = n;
+    return 0;
 }
 
 static ssize_t upgradeBufReadLine(upgradeReader *r, char *buf, size_t maxlen) {
@@ -135,7 +115,7 @@ typedef struct upgradeSendWorker {
     pthread_t thread;
     int thread_id;
     int total_threads;
-    int fd;
+    connection *conn;
     long long keys_transferred;
     long long bytes_transferred;
     int error;
@@ -143,7 +123,7 @@ typedef struct upgradeSendWorker {
     char errmsg[256];
 } upgradeSendWorker;
 
-static int upgradeSendKey(int fd, sds keyname, long long ttl, sds serialized, int dbid, sds *sendbuf) {
+static int upgradeSendKey(connection *conn, sds keyname, long long ttl, sds serialized, int dbid, sds *sendbuf) {
     char ttlstr[21], dbidstr[21];
     int ttllen = ll2string(ttlstr, sizeof(ttlstr), ttl);
     int dbidlen = ll2string(dbidstr, sizeof(dbidstr), dbid);
@@ -159,7 +139,7 @@ static int upgradeSendKey(int fd, sds keyname, long long ttl, sds serialized, in
     *sendbuf = sdscatlen(*sendbuf, dbidstr, dbidlen);
     *sendbuf = sdscatlen(*sendbuf, "\r\n", 2);
 
-    if (upgradeWriteAll(fd, *sendbuf, sdslen(*sendbuf)) == -1) return -1;
+    if (upgradeWriteAll(conn, *sendbuf, sdslen(*sendbuf)) == -1) return -1;
     sdsclear(*sendbuf);
     return 0;
 }
@@ -191,7 +171,7 @@ static void upgradeSendEntryCallback(void *privdata, void *entry) {
 
     sds serialized = payload.io.buffer.ptr;
 
-    if (upgradeSendKey(w->fd, keyname, ttl, serialized, ctx->dbid, &ctx->sendbuf) == -1) {
+    if (upgradeSendKey(w->conn, keyname, ttl, serialized, ctx->dbid, &ctx->sendbuf) == -1) {
         snprintf(w->errmsg, sizeof(w->errmsg), "write error: %s", strerror(errno));
         w->error = 1;
         sdsfree(serialized);
@@ -226,8 +206,8 @@ static void *upgradeSendWorkerMain(void *arg) {
     }
 
     if (!w->error && sdslen(ctx.sendbuf) > 0) {
-        if (upgradeWriteAll(w->fd, ctx.sendbuf, sdslen(ctx.sendbuf)) == -1) {
-            snprintf(w->errmsg, sizeof(w->errmsg), "flush error: %s", strerror(errno));
+        if (upgradeWriteAll(w->conn, ctx.sendbuf, sdslen(ctx.sendbuf)) == -1) {
+            snprintf(w->errmsg, sizeof(w->errmsg), "flush error: %s", connGetLastError(w->conn));
             w->error = 1;
         }
     }
@@ -235,7 +215,7 @@ static void *upgradeSendWorkerMain(void *arg) {
 
     if (!w->error) {
         const char *done_cmd = "*1\r\n$12\r\nUPGRADE.DONE\r\n";
-        if (upgradeWriteAll(w->fd, done_cmd, strlen(done_cmd)) == -1) {
+        if (upgradeWriteAll(w->conn, done_cmd, strlen(done_cmd)) == -1) {
             w->error = 1;
         }
     }
@@ -247,7 +227,7 @@ static void *upgradeSendWorkerMain(void *arg) {
 /* ========================== Receiver Thread (new_replica side) ========================== */
 
 typedef struct upgradeRecvThreadArg {
-    int fd;
+    connection *conn;
     int thread_id;
     long long *keys_inserted;
     long long *bytes_received;
@@ -274,7 +254,7 @@ static sds upgradeRecvReadBulk(upgradeReader *r, int len) {
 static void *upgradeRecvWorkerMain(void *arg) {
     upgradeRecvThreadArg *targ = (upgradeRecvThreadArg *)arg;
     upgradeReader reader;
-    upgradeReaderInit(&reader, targ->fd);
+    upgradeReaderInit(&reader, targ->conn);
     char linebuf[256];
 
     while (1) {
@@ -505,88 +485,58 @@ void upgradeCommand(client *c) {
     server.upgrade->state = UPGRADE_STATE_SCANNING;
     server.upgrade->start_time = mstime();
 
-    int *fds = zmalloc(sizeof(int) * num_threads);
+    connection **conns = zmalloc(sizeof(connection *) * num_threads);
 
     /* Open connections to m_replica */
     serverLog(LL_NOTICE, "UPGRADE: connecting to m_replica %s:%d with %d threads...", m_host, m_port, num_threads);
 
     /* Phase 1: Handshake — get metadata from m_replica to pre-size hashtables */
     {
-        char err[ANET_ERR_LEN];
-        int initfd = anetTcpNonBlockBestEffortBindConnect(err, m_host, m_port, NULL, 0);
-        if (initfd == -1) {
+        connection *initconn = connCreate(connTypeOfReplication());
+        if (connBlockingConnect(initconn, m_host, m_port, 5000) != C_OK) {
+            connClose(initconn);
             server.upgrade->state = UPGRADE_STATE_ABORTED;
             addReplyError(c, "Failed to connect to m_replica for handshake");
             return;
         }
-        struct pollfd pfd = { .fd = initfd, .events = POLLOUT };
-        if (poll(&pfd, 1, 5000) <= 0) { close(initfd); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake connect timeout"); return; }
-        int sockerr = 0; socklen_t errlen = sizeof(sockerr);
-        if (getsockopt(initfd, SOL_SOCKET, SO_ERROR, &sockerr, &errlen) == -1 || sockerr != 0) { close(initfd); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake connect error"); return; }
-        anetBlock(err, initfd);
 
         /* Send UPGRADE.INIT */
         const char *init_cmd = "*1\r\n$12\r\nUPGRADE.INIT\r\n";
-        if (upgradeWriteAll(initfd, init_cmd, strlen(init_cmd)) == -1) { close(initfd); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake write error"); return; }
+        if (upgradeWriteAll(initconn, init_cmd, strlen(init_cmd)) == -1) { connClose(initconn); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake write error"); return; }
 
         /* Read response: *<num_dbs>\r\n then for each db: :<keycount>\r\n */
         char linebuf[256];
-        if (upgradeReadLine(initfd, linebuf, sizeof(linebuf)) <= 0 || linebuf[0] != '*') { close(initfd); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake read error"); return; }
+        if (upgradeReadLine(initconn, linebuf, sizeof(linebuf)) <= 0 || linebuf[0] != '*') { connClose(initconn); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake read error"); return; }
         int num_dbs_reported = atoi(linebuf + 1);
 
         for (int dbid = 0; dbid < num_dbs_reported; dbid++) {
-            if (upgradeReadLine(initfd, linebuf, sizeof(linebuf)) <= 0) { close(initfd); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake read error"); return; }
+            if (upgradeReadLine(initconn, linebuf, sizeof(linebuf)) <= 0) { connClose(initconn); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake read error"); return; }
             long long num_buckets = atoll(linebuf + 1);
             if (num_buckets > 0 && dbid < server.dbnum) {
-                /* Ensure db exists */
                 if (server.db[dbid] == NULL) {
                     server.db[dbid] = createDatabase(dbid);
                 }
-                /* Pre-expand hashtable to the EXACT same number of buckets as m_replica.
-                 * hashtableExpand takes a capacity (entries), so we multiply buckets by
-                 * ENTRIES_PER_BUCKET to get a capacity that results in the same bucket count. */
                 kvstoreHashtableExpand(server.db[dbid]->keys, 0, num_buckets * 7);
             }
         }
 
-        close(initfd);
+        connClose(initconn);
         serverLog(LL_NOTICE, "UPGRADE: handshake done. Pre-sized hashtables for %d dbs.", num_dbs_reported);
     }
 
     /* Phase 2: Open channels */
     for (int i = 0; i < num_threads; i++) {
-        char err[ANET_ERR_LEN];
-        fds[i] = anetTcpNonBlockBestEffortBindConnect(err, m_host, m_port, NULL, 0);
-        if (fds[i] == -1) {
-            serverLog(LL_WARNING, "UPGRADE: connect to %s:%d failed: %s", m_host, m_port, err);
-            for (int j = 0; j < i; j++) close(fds[j]);
-            zfree(fds);
+        conns[i] = connCreate(connTypeOfReplication());
+        if (connBlockingConnect(conns[i], m_host, m_port, 5000) != C_OK) {
+            serverLog(LL_WARNING, "UPGRADE: connect to %s:%d failed: %s", m_host, m_port, connGetLastError(conns[i]));
+            for (int j = 0; j <= i; j++) connClose(conns[j]);
+            zfree(conns);
             server.upgrade->state = UPGRADE_STATE_ABORTED;
             addReplyError(c, "Failed to connect to m_replica");
             return;
         }
 
-        /* Wait for connect */
-        struct pollfd pfd = { .fd = fds[i], .events = POLLOUT };
-        if (poll(&pfd, 1, 5000) <= 0) {
-            for (int j = 0; j <= i; j++) close(fds[j]);
-            zfree(fds);
-            server.upgrade->state = UPGRADE_STATE_ABORTED;
-            addReplyError(c, "Connection to m_replica timed out");
-            return;
-        }
-        int sockerr = 0;
-        socklen_t errlen = sizeof(sockerr);
-        if (getsockopt(fds[i], SOL_SOCKET, SO_ERROR, &sockerr, &errlen) == -1 || sockerr != 0) {
-            for (int j = 0; j <= i; j++) close(fds[j]);
-            zfree(fds);
-            server.upgrade->state = UPGRADE_STATE_ABORTED;
-            addReplyError(c, "Connection to m_replica failed");
-            return;
-        }
-
-        anetBlock(err, fds[i]);
-        anetEnableTcpNoDelay(err, fds[i]);
+        anetEnableTcpNoDelay(NULL, conns[i]->fd);
 
         /* Send UPGRADE.CHANNEL handshake */
         char idbuf[21], threadsbuf[21];
@@ -596,9 +546,9 @@ void upgradeCommand(client *c) {
         int len = snprintf(cmd, sizeof(cmd),
                            "*3\r\n$15\r\nUPGRADE.CHANNEL\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
                            idlen, idbuf, threadslen, threadsbuf);
-        if (upgradeWriteAll(fds[i], cmd, len) == -1) {
-            for (int j = 0; j <= i; j++) close(fds[j]);
-            zfree(fds);
+        if (upgradeWriteAll(conns[i], cmd, len) == -1) {
+            for (int j = 0; j <= i; j++) connClose(conns[j]);
+            zfree(conns);
             server.upgrade->state = UPGRADE_STATE_ABORTED;
             addReplyError(c, "Failed to send UPGRADE.CHANNEL");
             return;
@@ -606,10 +556,10 @@ void upgradeCommand(client *c) {
 
         /* Read +OK */
         char buf[64];
-        if (upgradeReadLine(fds[i], buf, sizeof(buf)) <= 0 || buf[0] != '+') {
+        if (upgradeReadLine(conns[i], buf, sizeof(buf)) <= 0 || buf[0] != '+') {
             serverLog(LL_WARNING, "UPGRADE: channel %d handshake failed: %.40s", i, buf);
-            for (int j = 0; j <= i; j++) close(fds[j]);
-            zfree(fds);
+            for (int j = 0; j <= i; j++) connClose(conns[j]);
+            zfree(conns);
             server.upgrade->state = UPGRADE_STATE_ABORTED;
             addReplyError(c, "UPGRADE.CHANNEL handshake failed");
             return;
@@ -617,6 +567,11 @@ void upgradeCommand(client *c) {
     }
 
     serverLog(LL_NOTICE, "UPGRADE: all %d channels connected. Starting receiver threads.", num_threads);
+
+    /* Make receiver connections blocking for thread I/O */
+    for (int i = 0; i < num_threads; i++) {
+        anetBlock(NULL, conns[i]->fd);
+    }
 
     /* Disable rehashing on receiver */
     hashtableSetResizePolicy(HASHTABLE_RESIZE_FORBID);
@@ -642,7 +597,7 @@ void upgradeCommand(client *c) {
     for (int i = 0; i < num_threads; i++) {
         keys_per_db[i] = zcalloc(sizeof(long long) * server.dbnum);
         upgradeRecvThreadArg *arg = zmalloc(sizeof(upgradeRecvThreadArg));
-        arg->fd = fds[i];
+        arg->conn = conns[i];
         arg->thread_id = i;
         arg->keys_inserted = &keys_inserted[i];
         arg->bytes_received = &bytes_received[i];
@@ -685,9 +640,9 @@ void upgradeCommand(client *c) {
 
     /* Close connections and free arrays */
     for (int i = 0; i < num_threads; i++) {
-        close(fds[i]);
+        connClose(conns[i]);
     }
-    zfree(fds);
+    zfree(conns);
     zfree(threads);
     zfree(keys_inserted);
     zfree(bytes_received);
@@ -780,9 +735,6 @@ void upgradeInitCommand(client *c) {
 
 /* ========================== UPGRADE.CHANNEL (m_replica side) ========================== */
 
-/* Forward declaration */
-static void upgradeRecvCheckCompletion(void);
-
 void upgradeChannelCommand(client *c) {
     if (c->argc != 3) {
         addReplyError(c, "wrong number of arguments for UPGRADE.CHANNEL");
@@ -815,14 +767,14 @@ void upgradeChannelCommand(client *c) {
         return;
     }
 
-    /* Store fd — we'll use the original fd directly (no dup) */
-    rs->fds[thread_id] = c->conn->fd;
+    /* Store connection — we'll use the client's connection directly */
+    rs->conns[thread_id] = c->conn;
     rs->clients[thread_id] = c;
     rs->channels_registered++;
 
     /* Reply OK immediately via direct write (bypass buffered I/O) */
     const char *ok_reply = "+OK\r\n";
-    write(c->conn->fd, ok_reply, 5);
+    connSyncWrite(c->conn, (char *)ok_reply, 5, 5000);
 
     /* Disable event loop on this client — prevent any further I/O */
     connSetReadHandler(c->conn, NULL);
@@ -845,11 +797,11 @@ void upgradeChannelCommand(client *c) {
         server.dict_resizing = 0;
         hashtableSetResizePolicy(HASHTABLE_RESIZE_FORBID);
 
-        /* Make fds blocking and disable Nagle */
+        /* Make connections blocking and disable Nagle */
         char err[ANET_ERR_LEN];
         for (int i = 0; i < rs->total_threads; i++) {
-            anetBlock(err, rs->fds[i]);
-            anetEnableTcpNoDelay(err, rs->fds[i]);
+            anetBlock(err, rs->conns[i]->fd);
+            anetEnableTcpNoDelay(err, rs->conns[i]->fd);
         }
 
         /* Force-initialize the crc64 combine cache before spawning threads.
@@ -867,7 +819,7 @@ void upgradeChannelCommand(client *c) {
         for (int i = 0; i < rs->total_threads; i++) {
             workers[i].thread_id = i;
             workers[i].total_threads = rs->total_threads;
-            workers[i].fd = rs->fds[i];
+            workers[i].conn = rs->conns[i];
         }
 
         rs->workers = workers;
@@ -1007,7 +959,7 @@ void upgradeCron(void) {
         serverLog(LL_NOTICE, "UPGRADE.CHANNEL: bulk transfer complete. %lld keys, %lld bytes%s. Entering delta phase.",
                   total_keys, total_bytes, had_error ? " (with errors)" : "");
 
-        /* Send REPLINFO on fd[0] or enter delta phase */
+        /* Send REPLINFO on conn[0] or enter delta phase */
         if (server.primary_host == NULL) {
             char offstr[21];
             int offlen = ll2string(offstr, sizeof(offstr), rs->snapshot_repl_offset);
@@ -1015,7 +967,7 @@ void upgradeCron(void) {
             int rilen = snprintf(replinfo, sizeof(replinfo),
                                  "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
                                  server.replid, offlen, offstr);
-            write(rs->fds[0], replinfo, rilen);
+            connSyncWrite(rs->conns[0], replinfo, rilen, 5000);
             if (rs->clients[0]) {
                 freeClientAsync(rs->clients[0]);
                 rs->clients[0] = NULL;
@@ -1026,7 +978,7 @@ void upgradeCron(void) {
             server.upgrade_recv = NULL;
             return;
         } else {
-            rs->delta_fd = rs->fds[0];
+            rs->delta_conn = rs->conns[0];
             rs->delta_phase = 1;
         }
     }
@@ -1034,7 +986,7 @@ void upgradeCron(void) {
     /* Delta phase: send REPLINFO with snapshot offset so new_replica PSYNCs
      * from the point the scan started. This is correct because the scan
      * captured the m_replica's state at snapshot_repl_offset. */
-    if (rs->delta_phase && rs->delta_fd >= 0) {
+    if (rs->delta_phase && rs->delta_conn != NULL) {
         const char *replid = server.replid;
         long long offset = rs->snapshot_repl_offset;
 
@@ -1045,12 +997,12 @@ void upgradeCron(void) {
                            "*3\r\n$16\r\nUPGRADE.REPLINFO\r\n$40\r\n%.40s\r\n$%d\r\n%s\r\n",
                            replid, offlen, offstr);
 
-        write(rs->delta_fd, replinfo, len);
+        connSyncWrite(rs->delta_conn, replinfo, len, 5000);
         if (rs->clients[0]) {
             freeClientAsync(rs->clients[0]);
             rs->clients[0] = NULL;
         }
-        rs->delta_fd = -1;
+        rs->delta_conn = NULL;
         rs->delta_phase = 0;
 
         serverLog(LL_NOTICE, "UPGRADE: sent REPLINFO replid=%.40s offset=%lld",
@@ -1061,6 +1013,3 @@ void upgradeCron(void) {
     }
 }
 
-static void upgradeRecvCheckCompletion(void) {
-    /* No-op — completion is handled synchronously in upgradeCommand */
-}

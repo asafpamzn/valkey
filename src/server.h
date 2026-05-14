@@ -1102,7 +1102,7 @@ typedef struct upgradeSendWorker upgradeSendWorker;
 typedef struct upgradeRecvState {
     int total_threads;
     int channels_registered;         /* How many UPGRADE.CHANNEL have arrived */
-    int fds[UPGRADE_MAX_THREADS];    /* fds taken from UPGRADE.CHANNEL clients */
+    connection *conns[UPGRADE_MAX_THREADS]; /* connections from UPGRADE.CHANNEL clients */
     client *clients[UPGRADE_MAX_THREADS]; /* client objects (kept alive during transfer) */
     pthread_t threads[UPGRADE_MAX_THREADS];
     long long keys_inserted[UPGRADE_MAX_THREADS]; /* per-thread counters */
@@ -1113,7 +1113,7 @@ typedef struct upgradeRecvState {
     upgradeSendWorker *workers;      /* Array of sender worker state */
     long long snapshot_repl_offset;  /* primary_repl_offset captured at scan start */
     /* Delta forwarding state */
-    int delta_fd;                    /* fd kept open for delta forwarding (-1 if none) */
+    connection *delta_conn;          /* connection kept open for delta forwarding (NULL if none) */
     int delta_phase;                 /* 1 = forwarding delta, 0 = bulk phase or done */
 } upgradeRecvState;
 
