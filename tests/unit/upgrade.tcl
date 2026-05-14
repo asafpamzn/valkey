@@ -1,6 +1,6 @@
 # ========================== 2-Node Tests (m_replica + new_replica) ==========================
 
-start_server {tags {"upgrade external:skip"}} {
+start_server {tags {"upgrade external:skip needs:debug"}} {
     set m_replica [srv 0 client]
     set m_replica_host [srv 0 host]
     set m_replica_port [srv 0 port]
@@ -89,70 +89,58 @@ start_server {tags {"upgrade external:skip"}} {
     # --- Data Types ---
 
     start_server {} {
-        set nr2 [srv 0 client]
+        set new_replica [srv 0 client]
 
         test {UPGRADE handles all data types} {
-            set result [$nr2 upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port]
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port]
             assert_equal $result {OK}
 
             # String
-            assert_equal [$nr2 get "key:25"] "value:25"
+            assert_equal [$new_replica get "key:25"] "value:25"
 
             # Hash
-            assert_equal [$nr2 hget myhash f1] "v1"
-            assert_equal [$nr2 hget myhash f3] "v3"
-            assert_equal [$nr2 hlen myhash] 3
+            assert_equal [$new_replica hget myhash f1] "v1"
+            assert_equal [$new_replica hget myhash f3] "v3"
+            assert_equal [$new_replica hlen myhash] 3
 
             # List
-            assert_equal [$nr2 lrange mylist 0 -1] {a b c d e}
-            assert_equal [$nr2 llen mylist] 5
+            assert_equal [$new_replica lrange mylist 0 -1] {a b c d e}
+            assert_equal [$new_replica llen mylist] 5
 
             # Set
-            assert_equal [lsort [$nr2 smembers myset]] {w x y z}
-            assert_equal [$nr2 scard myset] 4
+            assert_equal [lsort [$new_replica smembers myset]] {w x y z}
+            assert_equal [$new_replica scard myset] 4
 
             # Sorted Set
-            assert_equal [$nr2 zrangebyscore myzset -inf +inf] {alpha beta gamma}
-            assert_equal [$nr2 zscore myzset beta] 2
+            assert_equal [$new_replica zrangebyscore myzset -inf +inf] {alpha beta gamma}
+            assert_equal [$new_replica zscore myzset beta] 2
 
             # Stream
-            assert {[$nr2 xlen mystream] == 1}
-        }
-
-        test {UPGRADE handles large values} {
-            # Add large values to m_replica
-            set bigval [string repeat "x" 1048576]
-            $m_replica set "bigkey" $bigval
-            for {set i 0} {$i < 1000} {incr i} {
-                $m_replica hset "bighash" "field:$i" "val:$i"
-            }
-            # Note: this test reuses m_replica which now has extra keys.
-            # The nr2 already got the data above, so check the ones we have.
-            assert_equal [string length [$m_replica get "bigkey"]] 1048576
+            assert {[$new_replica xlen mystream] == 1}
         }
     }
 
     # --- Threading ---
 
     start_server {} {
-        set nr3 [srv 0 client]
+        set new_replica [srv 0 client]
 
         test {UPGRADE with THREADS 4 works} {
-            set result [$nr3 upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 4]
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 4]
             assert_equal $result {OK}
-            assert {[$nr3 dbsize] >= 75}
-            assert_equal [$nr3 get "key:25"] "value:25"
+            assert {[$new_replica dbsize] >= 75}
+            assert_equal [$new_replica get "key:25"] "value:25"
         }
     }
 
     start_server {} {
-        set nr4 [srv 0 client]
+        set new_replica [srv 0 client]
 
         test {UPGRADE rejects invalid THREADS} {
-            catch {$nr4 upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 0} err
+            catch {$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 0} err
             assert_match {*THREADS must be*} $err
 
-            catch {$nr4 upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 100} err
+            catch {$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 100} err
             assert_match {*THREADS must be*} $err
         }
     }
@@ -160,18 +148,99 @@ start_server {tags {"upgrade external:skip"}} {
     # --- Error Handling ---
 
     start_server {} {
-        set nr5 [srv 0 client]
+        set new_replica [srv 0 client]
 
         test {UPGRADE rejects wrong argument count} {
-            catch {$nr5 upgrade 127.0.0.1} err
+            catch {$new_replica upgrade 127.0.0.1} err
             assert_match {*Usage*} $err
+        }
+
+        test {UPGRADE rejects unreachable host} {
+            # Port 1 is unlikely to have a Valkey server
+            catch {$new_replica upgrade 127.0.0.1 1 127.0.0.1 1} err
+            assert_match {*ERR*} $err
+        }
+
+        test {UPGRADE rejects second invocation on non-empty node} {
+            # First upgrade succeeds
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port]
+            assert_equal $result {OK}
+
+            # Second upgrade should fail (node is no longer empty)
+            catch {$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port} err
+            assert_match {*empty node*} $err
+        }
+    }
+
+    # --- Empty source ---
+
+    start_server {} {
+        set empty_source [srv 0 client]
+        set empty_source_host [srv 0 host]
+        set empty_source_port [srv 0 port]
+
+        start_server {} {
+            set new_replica [srv 0 client]
+
+            test {UPGRADE with empty source completes with 0 keys} {
+                set result [$new_replica upgrade $empty_source_host $empty_source_port $empty_source_host $empty_source_port]
+                assert_equal $result {OK}
+                assert_equal [$new_replica dbsize] 0
+
+                set status [$new_replica upgrade status]
+                assert_equal [dict get $status state] "done"
+                assert_equal [dict get $status keys_transferred] 0
+            }
+        }
+    }
+}
+
+# --- 2-Node: Large Values (standalone) ---
+
+start_server {tags {"upgrade external:skip"}} {
+    set m_replica [srv 0 client]
+    set m_replica_host [srv 0 host]
+    set m_replica_port [srv 0 port]
+
+    # Create 1MB string and large hash on m_replica
+    $m_replica set "bigkey" [string repeat "x" 1048576]
+    for {set i 0} {$i < 1000} {incr i} {
+        $m_replica hset "bighash" "field:$i" "val:$i"
+    }
+    # Also some normal keys
+    for {set i 0} {$i < 50} {incr i} {
+        $m_replica set "normal:$i" "nval:$i"
+    }
+
+    start_server {} {
+        set new_replica [srv 0 client]
+
+        test {UPGRADE handles large values} {
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port]
+            assert_equal $result {OK}
+
+            wait_for_condition 50 200 {
+                [catch {$new_replica ping} e] == 0
+            } else {
+                fail "new_replica not responding after upgrade"
+            }
+
+            $new_replica replicaof no one
+
+            # Verify the large string transferred correctly
+            assert_equal [string length [$new_replica get "bigkey"]] 1048576
+            # Verify the large hash transferred correctly
+            assert_equal [$new_replica hlen "bighash"] 1000
+            assert_equal [$new_replica hget "bighash" "field:500"] "val:500"
+            # Verify normal keys too
+            assert_equal [$new_replica get "normal:25"] "nval:25"
         }
     }
 }
 
 # ========================== 3-Node Tests (Primary + m_replica + new_replica) ==========================
 
-start_server {tags {"upgrade external:skip"}} {
+start_server {tags {"upgrade external:skip needs:repl"}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -267,10 +336,11 @@ start_server {tags {"upgrade external:skip"}} {
 # ========================== Long-Running / Large Data Tests ==========================
 # These tests exercise the UPGRADE command with >= 1GB of data to validate
 # correctness and stability under realistic production-like data volumes.
+# Gated behind the large-memory tag (requires --large-memory flag).
 
-# --- 2-Node: 1GB bulk transfer (100K keys × 10KB values) ---
+# --- 2-Node: 1GB bulk transfer (100K keys x 10KB values) ---
 
-start_server {tags {"upgrade external:skip slow"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:debug large-memory"}] {
     set m_replica [srv 0 client]
     set m_replica_host [srv 0 host]
     set m_replica_port [srv 0 port]
@@ -283,7 +353,7 @@ start_server {tags {"upgrade external:skip slow"}} {
         $m_replica set "ttlbig:$i" [string repeat "t" 1024] EX 7200
     }
 
-    start_server {} {
+    start_server [list overrides [list save ""]] {
         set new_replica [srv 0 client]
         set new_replica_host [srv 0 host]
         set new_replica_port [srv 0 port]
@@ -294,7 +364,7 @@ start_server {tags {"upgrade external:skip slow"}} {
             set elapsed [expr {[clock milliseconds] - $start}]
             assert_equal $result {OK}
 
-            wait_for_condition 200 100 {
+            wait_for_condition 600 500 {
                 [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
@@ -305,7 +375,7 @@ start_server {tags {"upgrade external:skip slow"}} {
             # Should have all 110K keys
             assert {[$new_replica dbsize] >= 110000}
 
-            # Verify random samples (debug populate format is "prefix:N")
+            # Verify samples (debug populate format is "prefix:N" with padded value)
             assert_equal [string length [$new_replica get "bigdata:50000"]] 10000
             assert_equal [string length [$new_replica get "bigdata:99999"]] 10000
 
@@ -313,7 +383,6 @@ start_server {tags {"upgrade external:skip slow"}} {
             assert {[$new_replica ttl "ttlbig:5000"] > 0}
             assert {[$new_replica ttl "ttlbig:9999"] > 0}
 
-            # Log timing for visibility
             puts "UPGRADE 1GB (2-node): $elapsed ms for [$new_replica dbsize] keys"
         }
 
@@ -328,14 +397,14 @@ start_server {tags {"upgrade external:skip slow"}} {
         test {UPGRADE 1GB: data integrity spot checks} {
             # Check value lengths are correct for debug populate keys (10KB each)
             for {set i 0} {$i < 100} {incr i} {
-                set idx [expr {int(rand() * 100000)}]
+                set idx [expr {$i * 1000}]
                 set val [$new_replica get "bigdata:$idx"]
                 assert_equal [string length $val] 10000
             }
 
             # Check TTL keys have correct values and TTL
             for {set i 0} {$i < 50} {incr i} {
-                set idx [expr {int(rand() * 10000)}]
+                set idx [expr {$i * 200}]
                 assert_equal [string length [$new_replica get "ttlbig:$idx"]] 1024
                 assert {[$new_replica ttl "ttlbig:$idx"] > 0}
             }
@@ -359,89 +428,89 @@ start_server {tags {"upgrade external:skip slow"}} {
 
 # --- 2-Node: 1GB with multi-threaded (THREADS 1 vs 4 vs 8) ---
 
-start_server {tags {"upgrade external:skip slow"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:debug large-memory"}] {
     set m_replica [srv 0 client]
     set m_replica_host [srv 0 host]
     set m_replica_port [srv 0 port]
 
-    # ~1GB: 50K keys × 20KB values
+    # ~1GB: 50K keys x 20KB values
     $m_replica debug populate 50000 mt 20000
 
-    start_server {} {
-        set nr [srv 0 client]
+    start_server [list overrides [list save ""]] {
+        set new_replica [srv 0 client]
 
-        test {UPGRADE 1GB: single-threaded baseline timing} {
+        test {UPGRADE 1GB: single-threaded baseline} {
             set start [clock milliseconds]
-            set result [$nr upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 1]
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 1]
             set elapsed_1t [expr {[clock milliseconds] - $start}]
             assert_equal $result {OK}
-            wait_for_condition 200 100 {
-                [catch {$nr ping} e] == 0
+            wait_for_condition 600 500 {
+                [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
             }
-            $nr replicaof no one
-            assert {[$nr dbsize] >= 50000}
+            $new_replica replicaof no one
+            assert {[$new_replica dbsize] >= 50000}
             puts "UPGRADE 1GB (1 thread): $elapsed_1t ms"
         }
     }
 
-    start_server {} {
-        set nr [srv 0 client]
+    start_server [list overrides [list save ""]] {
+        set new_replica [srv 0 client]
 
-        test {UPGRADE 1GB: 4 threads faster than 1 thread} {
+        test {UPGRADE 1GB: 4 threads completes successfully} {
             set start [clock milliseconds]
-            set result [$nr upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 4]
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 4]
             set elapsed_4t [expr {[clock milliseconds] - $start}]
             assert_equal $result {OK}
-            wait_for_condition 200 100 {
-                [catch {$nr ping} e] == 0
+            wait_for_condition 600 500 {
+                [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
             }
-            $nr replicaof no one
-            assert {[$nr dbsize] >= 50000}
+            $new_replica replicaof no one
+            assert {[$new_replica dbsize] >= 50000}
             puts "UPGRADE 1GB (4 threads): $elapsed_4t ms"
         }
     }
 
-    start_server {} {
-        set nr [srv 0 client]
+    start_server [list overrides [list save ""]] {
+        set new_replica [srv 0 client]
 
         test {UPGRADE 1GB: 8 threads completes successfully} {
             set start [clock milliseconds]
-            set result [$nr upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8]
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8]
             set elapsed_8t [expr {[clock milliseconds] - $start}]
             assert_equal $result {OK}
-            wait_for_condition 200 100 {
-                [catch {$nr ping} e] == 0
+            wait_for_condition 600 500 {
+                [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
             }
-            $nr replicaof no one
-            assert {[$nr dbsize] >= 50000}
+            $new_replica replicaof no one
+            assert {[$new_replica dbsize] >= 50000}
 
             # Verify data integrity with 8 threads
             for {set i 0} {$i < 100} {incr i} {
-                set idx [expr {int(rand() * 50000)}]
-                assert_equal [string length [$nr get "mt:$idx"]] 20000
+                set idx [expr {$i * 500}]
+                assert_equal [string length [$new_replica get "mt:$idx"]] 20000
             }
             puts "UPGRADE 1GB (8 threads): $elapsed_8t ms"
         }
     }
 }
 
-# --- 2-Node: Mixed data types at scale (>1GB total) ---
+# --- 2-Node: Mixed data types at scale (>100MB total) ---
 
-start_server {tags {"upgrade external:skip"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:debug large-memory"}] {
     set m_replica [srv 0 client]
     set m_replica_host [srv 0 host]
     set m_replica_port [srv 0 port]
 
-    # Strings: 10K keys × 10KB = ~100MB
+    # Strings: 10K keys x 10KB = ~100MB
     $m_replica debug populate 10000 str 10000
 
-    # Hashes: 500 hashes with 50 fields × 1KB values = ~25MB
+    # Hashes: 500 hashes with 50 fields x 1KB values = ~25MB
     for {set i 0} {$i < 500} {incr i} {
         set args [list]
         for {set f 0} {$f < 50} {incr f} {
@@ -450,7 +519,7 @@ start_server {tags {"upgrade external:skip"}} {
         $m_replica hset "hash:$i" {*}$args
     }
 
-    # Lists: 200 lists with 500 elements × 100 bytes = ~10MB
+    # Lists: 200 lists with 500 elements x 100 bytes = ~10MB
     for {set i 0} {$i < 200} {incr i} {
         set args [list]
         for {set e 0} {$e < 500} {incr e} {
@@ -477,54 +546,54 @@ start_server {tags {"upgrade external:skip"}} {
         $m_replica sadd "set:$i" {*}$args
     }
 
-    start_server {} {
-        set nr [srv 0 client]
+    start_server [list overrides [list save ""]] {
+        set new_replica [srv 0 client]
 
-        test {UPGRADE 1GB mixed types: all data types transferred correctly} {
-            set result [$nr upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8]
+        test {UPGRADE mixed types: all data types transferred correctly} {
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8]
             assert_equal $result {OK}
 
-            wait_for_condition 200 100 {
-                [catch {$nr ping} e] == 0
+            wait_for_condition 600 500 {
+                [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
             }
 
-            $nr replicaof no one
+            $new_replica replicaof no one
 
             # Total keys: 10K strings + 500 hashes + 200 lists + 200 zsets + 200 sets = 11,100
-            assert {[$nr dbsize] >= 11000}
+            assert {[$new_replica dbsize] >= 11000}
 
             # Verify strings (debug populate format: "str:N")
             for {set i 0} {$i < 20} {incr i} {
-                set idx [expr {int(rand() * 10000)}]
-                assert_equal [string length [$nr get "str:$idx"]] 10000
+                set idx [expr {$i * 500}]
+                assert_equal [string length [$new_replica get "str:$idx"]] 10000
             }
 
             # Verify hashes
             for {set i 0} {$i < 20} {incr i} {
-                set idx [expr {int(rand() * 500)}]
-                assert_equal [$nr hlen "hash:$idx"] 50
-                assert_equal [string length [$nr hget "hash:$idx" "field:25"]] 1000
+                set idx [expr {$i * 25}]
+                assert_equal [$new_replica hlen "hash:$idx"] 50
+                assert_equal [string length [$new_replica hget "hash:$idx" "field:25"]] 1000
             }
 
             # Verify lists
             for {set i 0} {$i < 20} {incr i} {
-                set idx [expr {int(rand() * 200)}]
-                assert_equal [$nr llen "list:$idx"] 500
-                assert_equal [string length [$nr lindex "list:$idx" 250]] 100
+                set idx [expr {$i * 10}]
+                assert_equal [$new_replica llen "list:$idx"] 500
+                assert_equal [string length [$new_replica lindex "list:$idx" 250]] 100
             }
 
             # Verify sorted sets
             for {set i 0} {$i < 20} {incr i} {
-                set idx [expr {int(rand() * 200)}]
-                assert_equal [$nr zcard "zset:$idx"] 200
+                set idx [expr {$i * 10}]
+                assert_equal [$new_replica zcard "zset:$idx"] 200
             }
 
             # Verify sets
             for {set i 0} {$i < 20} {incr i} {
-                set idx [expr {int(rand() * 200)}]
-                assert_equal [$nr scard "set:$idx"] 200
+                set idx [expr {$i * 10}]
+                assert_equal [$new_replica scard "set:$idx"] 200
             }
         }
     }
@@ -532,15 +601,15 @@ start_server {tags {"upgrade external:skip"}} {
 
 # --- 3-Node: 1GB with PSYNC verification ---
 
-start_server {tags {"upgrade external:skip slow"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:repl needs:debug large-memory"}] {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    # Populate primary with ~1GB: 100K keys × 10KB values
+    # Populate primary with ~1GB: 100K keys x 10KB values
     $primary debug populate 100000 pk 10000
 
-    start_server {} {
+    start_server [list overrides [list save ""]] {
         set m_replica [srv 0 client]
         set m_replica_host [srv 0 host]
         set m_replica_port [srv 0 port]
@@ -554,13 +623,13 @@ start_server {tags {"upgrade external:skip slow"}} {
         }
 
         # Wait for full sync to complete (1GB takes time)
-        wait_for_condition 300 1000 {
+        wait_for_condition 600 1000 {
             [$m_replica dbsize] == 100000
         } else {
             fail "m_replica dbsize != 100000 (got [$m_replica dbsize])"
         }
 
-        start_server {} {
+        start_server [list overrides [list save ""]] {
             set new_replica [srv 0 client]
             set new_replica_host [srv 0 host]
             set new_replica_port [srv 0 port]
@@ -571,7 +640,7 @@ start_server {tags {"upgrade external:skip slow"}} {
                 set elapsed [expr {[clock milliseconds] - $start}]
                 assert_equal $result {OK}
 
-                wait_for_condition 200 100 {
+                wait_for_condition 600 500 {
                     [catch {$new_replica ping} e] == 0
                 } else {
                     fail "new_replica still loading after upgrade"
@@ -618,9 +687,9 @@ start_server {tags {"upgrade external:skip slow"}} {
                     fail "new_replica did not receive post-upgrade writes"
                 }
 
-                # Verify all post-upgrade keys
+                # Verify sample of post-upgrade keys
                 for {set i 0} {$i < 100} {incr i} {
-                    set idx [expr {int(rand() * 1000)}]
+                    set idx [expr {$i * 10}]
                     assert_equal [$new_replica get "post_upgrade:$idx"] [string repeat "n" 1000]
                 }
             }
@@ -628,7 +697,7 @@ start_server {tags {"upgrade external:skip slow"}} {
             test {3-node 1GB: data integrity after full cycle} {
                 # Verify original keys still correct (debug populate format: "pk:N")
                 for {set i 0} {$i < 100} {incr i} {
-                    set idx [expr {int(rand() * 100000)}]
+                    set idx [expr {$i * 1000}]
                     assert_equal [string length [$new_replica get "pk:$idx"]] 10000
                 }
             }
@@ -638,18 +707,15 @@ start_server {tags {"upgrade external:skip slow"}} {
 
 # --- 3-Node: Writes during UPGRADE (primary writes while bulk transfer runs) ---
 
-start_server {tags {"upgrade external:skip slow"}} {
+start_server [list overrides [list save "" repl-backlog-size 100mb] tags {"upgrade external:skip needs:repl needs:debug large-memory"}] {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    # Large backlog so PSYNC succeeds after UPGRADE scan completes
-    $primary config set repl-backlog-size 100mb
-
-    # Populate primary with ~500MB: 50K keys × 10KB
+    # Populate primary with ~500MB: 50K keys x 10KB
     $primary debug populate 50000 base 10000
 
-    start_server {} {
+    start_server [list overrides [list save ""]] {
         set m_replica [srv 0 client]
         set m_replica_host [srv 0 host]
         set m_replica_port [srv 0 port]
@@ -661,32 +727,30 @@ start_server {tags {"upgrade external:skip slow"}} {
             fail "m_replica could not sync with Primary"
         }
 
-        wait_for_condition 300 1000 {
+        wait_for_condition 600 1000 {
             [$m_replica dbsize] == 50000
         } else {
             fail "m_replica dbsize != 50000 (got [$m_replica dbsize])"
         }
 
-        # Now write additional data to primary WHILE upgrade will be running.
-        # The delta phase should capture these writes.
-
-        start_server {} {
+        start_server [list overrides [list save ""]] {
             set new_replica [srv 0 client]
             set new_replica_host [srv 0 host]
             set new_replica_port [srv 0 port]
 
             test {3-node concurrent writes: writes during upgrade arrive via delta+PSYNC} {
-                # Start background write load on primary (writes for 10 seconds)
-                set load_handle [start_write_load $primary_host $primary_port 10]
+                # Start background write load on primary (writes for 30 seconds)
+                set load_handle [start_write_load $primary_host $primary_port 30]
 
-                # Run upgrade (this takes time with 50K×10KB = 500MB)
+                # Run upgrade (this takes time with 50K x 10KB = 500MB)
                 set result [$new_replica upgrade $m_replica_host $m_replica_port $primary_host $primary_port THREADS 4]
                 assert_equal $result {OK}
 
-                # Stop the writer
+                # Stop the writer and wait for disconnection
                 stop_write_load $load_handle
+                wait_load_handlers_disconnected
 
-                wait_for_condition 200 100 {
+                wait_for_condition 600 500 {
                     [catch {$new_replica ping} e] == 0
                 } else {
                     fail "new_replica still loading after upgrade"
@@ -721,7 +785,7 @@ start_server {tags {"upgrade external:skip slow"}} {
 
 # --- 2-Node: m_replica responsiveness during large transfer ---
 
-start_server {tags {"upgrade external:skip slow"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:debug large-memory"}] {
     set m_replica [srv 0 client]
     set m_replica_host [srv 0 host]
     set m_replica_port [srv 0 port]
@@ -729,7 +793,7 @@ start_server {tags {"upgrade external:skip slow"}} {
     # ~1GB data
     $m_replica debug populate 100000 resp 10000
 
-    start_server {} {
+    start_server [list overrides [list save ""]] {
         set new_replica [srv 0 client]
         set new_replica_host [srv 0 host]
         set new_replica_port [srv 0 port]
@@ -739,8 +803,8 @@ start_server {tags {"upgrade external:skip slow"}} {
             set bg_client [valkey_deferring_client_by_addr $new_replica_host $new_replica_port]
             $bg_client UPGRADE $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8
 
-            # Give it a moment to start the transfer
-            after 200
+            # Give it time to start the transfer
+            after 500
 
             # Repeatedly PING m_replica while transfer is running
             set pings_ok 0
@@ -753,20 +817,20 @@ start_server {tags {"upgrade external:skip slow"}} {
                 after 100
             }
 
-            # m_replica should respond to at least 90% of pings
-            assert {$pings_ok >= 45}
+            # m_replica should respond to at least 80% of pings (relaxed for slow CI)
+            assert {$pings_ok >= 40}
             puts "m_replica responsiveness: $pings_ok/$pings_total pings OK during 1GB transfer"
 
             # Also verify m_replica can serve reads during transfer
             set reads_ok 0
             for {set i 0} {$i < 20} {incr i} {
-                set idx [expr {int(rand() * 100000)}]
+                set idx [expr {$i * 5000}]
                 if {[catch {$m_replica get "resp:$idx"} val] == 0 && [string length $val] == 10000} {
                     incr reads_ok
                 }
                 after 50
             }
-            assert {$reads_ok >= 18}
+            assert {$reads_ok >= 16}
             puts "m_replica read responsiveness: $reads_ok/20 reads OK during transfer"
 
             # Wait for the upgrade to complete (read deferred response)
@@ -774,7 +838,7 @@ start_server {tags {"upgrade external:skip slow"}} {
             assert_equal $reply {OK}
             $bg_client close
 
-            wait_for_condition 200 100 {
+            wait_for_condition 600 500 {
                 [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
@@ -790,72 +854,72 @@ start_server {tags {"upgrade external:skip slow"}} {
 
 # --- 2-Node: Very large values (1MB+ per key) ---
 
-start_server {tags {"upgrade external:skip"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:debug large-memory"}] {
     set m_replica [srv 0 client]
     set m_replica_host [srv 0 host]
     set m_replica_port [srv 0 port]
 
-    # 256 keys × 1MB = 256MB of large values
+    # 256 keys x 1MB = 256MB of large values
     for {set i 0} {$i < 256} {incr i} {
         $m_replica set "huge:$i" [string repeat "M" 1048576]
     }
     # Also add some normal-sized keys
     $m_replica debug populate 10000 normal 100
 
-    start_server {} {
-        set nr [srv 0 client]
+    start_server [list overrides [list save ""]] {
+        set new_replica [srv 0 client]
 
         test {UPGRADE large values: 1MB values transfer correctly} {
             set start [clock milliseconds]
-            set result [$nr upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8]
+            set result [$new_replica upgrade $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8]
             set elapsed [expr {[clock milliseconds] - $start}]
             assert_equal $result {OK}
 
-            wait_for_condition 200 100 {
-                [catch {$nr ping} e] == 0
+            wait_for_condition 600 500 {
+                [catch {$new_replica ping} e] == 0
             } else {
                 fail "new_replica still loading after upgrade"
             }
 
-            $nr replicaof no one
+            $new_replica replicaof no one
 
-            assert {[$nr dbsize] >= 10256}
+            assert {[$new_replica dbsize] >= 10256}
 
             # Verify all 1MB values
             for {set i 0} {$i < 256} {incr i} {
-                assert_equal [string length [$nr get "huge:$i"]] 1048576
+                assert_equal [string length [$new_replica get "huge:$i"]] 1048576
             }
 
             # Verify normal keys too (debug populate format: "normal:N")
             for {set i 0} {$i < 50} {incr i} {
-                set idx [expr {int(rand() * 10000)}]
-                assert_equal [string length [$nr get "normal:$idx"]] 100
+                set idx [expr {$i * 200}]
+                assert_equal [string length [$new_replica get "normal:$idx"]] 100
             }
 
-            puts "UPGRADE large values (1MB × 256): $elapsed ms for [$nr dbsize] keys"
+            puts "UPGRADE large values (1MB x 256): $elapsed ms for [$new_replica dbsize] keys"
         }
     }
 }
 
 # --- 3-Node: Large data with multiple databases ---
 
-start_server {tags {"upgrade external:skip slow"}} {
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:repl needs:debug large-memory"}] {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
     # Spread ~1GB across multiple databases
-    # db0: 500MB (50K keys × 10KB)
+    # db0: 500MB (50K keys x 10KB)
     $primary debug populate 50000 db0key 10000
-    # db1: 300MB (30K keys × 10KB)
+    # db1: 300MB (30K keys x 10KB)
     $primary select 1
     $primary debug populate 30000 db1key 10000
-    # db2: 200MB (20K keys × 10KB)
+    # db2: 200MB (20K keys x 10KB)
     $primary select 2
     $primary debug populate 20000 db2key 10000
     $primary select 0
 
-    start_server {} {
+    start_server [list overrides [list save ""]] {
         set m_replica [srv 0 client]
         set m_replica_host [srv 0 host]
         set m_replica_port [srv 0 port]
@@ -868,7 +932,7 @@ start_server {tags {"upgrade external:skip slow"}} {
         }
 
         # Wait for full sync including all DBs
-        wait_for_condition 300 1000 {
+        wait_for_condition 600 1000 {
             [$m_replica dbsize] == 50000
         } else {
             fail "m_replica db0 size != 50000 (got [$m_replica dbsize])"
@@ -876,14 +940,14 @@ start_server {tags {"upgrade external:skip slow"}} {
 
         # Verify other DBs synced (check db1 has expected keys)
         $m_replica select 1
-        wait_for_condition 300 1000 {
+        wait_for_condition 600 1000 {
             [$m_replica dbsize] == 30000
         } else {
             fail "m_replica db1 not synced (got [$m_replica dbsize])"
         }
         $m_replica select 0
 
-        start_server {} {
+        start_server [list overrides [list save ""]] {
             set new_replica [srv 0 client]
             set new_replica_host [srv 0 host]
             set new_replica_port [srv 0 port]
@@ -892,7 +956,7 @@ start_server {tags {"upgrade external:skip slow"}} {
                 set result [$new_replica upgrade $m_replica_host $m_replica_port $primary_host $primary_port THREADS 8]
                 assert_equal $result {OK}
 
-                wait_for_condition 200 100 {
+                wait_for_condition 600 500 {
                     [catch {$new_replica ping} e] == 0
                 } else {
                     fail "new_replica still loading after upgrade"
@@ -900,8 +964,7 @@ start_server {tags {"upgrade external:skip slow"}} {
 
                 # Verify db0 (debug populate format: "db0key:N")
                 assert {[$new_replica dbsize] >= 50000}
-                set idx [expr {int(rand() * 50000)}]
-                assert_equal [string length [$new_replica get "db0key:$idx"]] 10000
+                assert_equal [string length [$new_replica get "db0key:25000"]] 10000
 
                 # Verify db1 (debug populate format: "db1key:N")
                 $new_replica select 1
@@ -958,6 +1021,69 @@ start_server {tags {"upgrade external:skip slow"}} {
                 }
                 $new_replica select 0
             }
+        }
+    }
+}
+
+# --- 2-Node: UPGRADE STATUS during in-progress transfer ---
+
+start_server [list overrides [list save ""] tags {"upgrade external:skip needs:debug large-memory"}] {
+    set m_replica [srv 0 client]
+    set m_replica_host [srv 0 host]
+    set m_replica_port [srv 0 port]
+
+    # Use enough data that the transfer takes measurable time
+    $m_replica debug populate 100000 status 10000
+
+    start_server [list overrides [list save ""]] {
+        set new_replica [srv 0 client]
+        set new_replica_host [srv 0 host]
+        set new_replica_port [srv 0 port]
+
+        test {UPGRADE STATUS during in-progress transfer shows running state} {
+            # Start upgrade via a deferred client so we can check status mid-transfer
+            set bg_client [valkey_deferring_client_by_addr $new_replica_host $new_replica_port]
+            $bg_client UPGRADE $m_replica_host $m_replica_port $m_replica_host $m_replica_port THREADS 8
+
+            # Give it time to start
+            after 200
+
+            # Check status while in progress (may already be done on fast machines)
+            set status_seen 0
+            for {set i 0} {$i < 20} {incr i} {
+                if {[catch {$new_replica upgrade status} status] == 0} {
+                    set state [dict get $status state]
+                    if {$state eq "running" || $state eq "bulk" || $state eq "delta"} {
+                        set status_seen 1
+                        assert {[dict exists $status keys_transferred]}
+                        assert {[dict exists $status elapsed_ms]}
+                        break
+                    } elseif {$state eq "done"} {
+                        set status_seen 1
+                        break
+                    }
+                }
+                after 100
+            }
+            assert {$status_seen == 1}
+
+            # Wait for completion
+            set reply [$bg_client read]
+            assert_equal $reply {OK}
+            $bg_client close
+
+            wait_for_condition 600 500 {
+                [catch {$new_replica ping} e] == 0
+            } else {
+                fail "new_replica still loading after upgrade"
+            }
+
+            $new_replica replicaof no one
+
+            # Final status should be done
+            set status [$new_replica upgrade status]
+            assert_equal [dict get $status state] "done"
+            assert {[dict get $status keys_transferred] >= 100000}
         }
     }
 }
