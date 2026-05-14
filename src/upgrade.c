@@ -501,22 +501,27 @@ void upgradeCommand(client *c) {
 
     /* Phase 1: Handshake — get metadata from m_replica to pre-size hashtables */
     {
+        serverLog(LL_NOTICE, "UPGRADE: Phase 1 - creating connection (type=%s)...",
+                  connTypeOfReplication() == connectionTypeTcp() ? "tcp" : "tls");
         connection *initconn = connCreate(connTypeOfReplication());
         if (connBlockingConnect(initconn, m_host, m_port, 5000) != C_OK) {
+            serverLog(LL_WARNING, "UPGRADE: Phase 1 connBlockingConnect failed: %s", connGetLastError(initconn));
             connClose(initconn);
             server.upgrade->state = UPGRADE_STATE_ABORTED;
             addReplyError(c, "Failed to connect to m_replica for handshake");
             return;
         }
         anetBlock(NULL, initconn->fd);
+        serverLog(LL_NOTICE, "UPGRADE: Phase 1 - connected, sending UPGRADE.INIT...");
 
         /* Send UPGRADE.INIT */
         const char *init_cmd = "*1\r\n$12\r\nUPGRADE.INIT\r\n";
         if (upgradeWriteAll(initconn, init_cmd, strlen(init_cmd)) == -1) { connClose(initconn); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake write error"); return; }
+        serverLog(LL_NOTICE, "UPGRADE: Phase 1 - UPGRADE.INIT sent, reading response...");
 
         /* Read response: *<num_dbs>\r\n then for each db: :<keycount>\r\n */
         char linebuf[256];
-        if (upgradeReadLine(initconn, linebuf, sizeof(linebuf)) <= 0 || linebuf[0] != '*') { connClose(initconn); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake read error"); return; }
+        if (upgradeReadLine(initconn, linebuf, sizeof(linebuf)) <= 0 || linebuf[0] != '*') { serverLog(LL_WARNING, "UPGRADE: Phase 1 readLine failed"); connClose(initconn); server.upgrade->state = UPGRADE_STATE_ABORTED; addReplyError(c, "Handshake read error"); return; }
         int num_dbs_reported = atoi(linebuf + 1);
 
         for (int dbid = 0; dbid < num_dbs_reported; dbid++) {
@@ -535,6 +540,7 @@ void upgradeCommand(client *c) {
     }
 
     /* Phase 2: Open channels */
+    serverLog(LL_NOTICE, "UPGRADE: Phase 2 - opening %d channels...", num_threads);
     for (int i = 0; i < num_threads; i++) {
         conns[i] = connCreate(connTypeOfReplication());
         if (connBlockingConnect(conns[i], m_host, m_port, 5000) != C_OK) {
@@ -550,6 +556,7 @@ void upgradeCommand(client *c) {
         anetEnableTcpNoDelay(NULL, conns[i]->fd);
 
         /* Send UPGRADE.CHANNEL handshake */
+        serverLog(LL_NOTICE, "UPGRADE: Phase 2 - channel %d connected, sending handshake...", i);
         char idbuf[21], threadsbuf[21];
         int idlen = snprintf(idbuf, sizeof(idbuf), "%d", i);
         int threadslen = snprintf(threadsbuf, sizeof(threadsbuf), "%d", num_threads);
@@ -566,6 +573,7 @@ void upgradeCommand(client *c) {
         }
 
         /* Read +OK */
+        serverLog(LL_NOTICE, "UPGRADE: Phase 2 - channel %d handshake sent, waiting for +OK...", i);
         char buf[64];
         if (upgradeReadLine(conns[i], buf, sizeof(buf)) <= 0 || buf[0] != '+') {
             serverLog(LL_WARNING, "UPGRADE: channel %d handshake failed: %.40s", i, buf);
@@ -780,7 +788,8 @@ void upgradeChannelCommand(client *c) {
 
     /* Reply OK immediately via direct write (bypass buffered I/O) */
     const char *ok_reply = "+OK\r\n";
-    connSyncWrite(c->conn, (char *)ok_reply, 5, 5000);
+    ssize_t nw = connSyncWrite(c->conn, (char *)ok_reply, 5, 5000);
+    serverLog(LL_NOTICE, "UPGRADE.CHANNEL: thread %lld replied +OK (nw=%zd)", thread_id, nw);
 
     /* Disable event loop on this client — prevent any further I/O */
     connSetReadHandler(c->conn, NULL);
