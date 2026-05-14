@@ -73,10 +73,19 @@ static void upgradeReaderInit(upgradeReader *r, connection *conn) {
 }
 
 static int upgradeReaderFill(upgradeReader *r) {
-    int n = connRead(r->conn, r->buf, UPGRADE_READ_BUF_SIZE);
+    /* We need a single partial read (not "read exactly N bytes").
+     * For TLS: connSyncRead does a single SSL_read (returns 1..size bytes).
+     * For TCP: connSyncRead loops until ALL size bytes arrive, so we use
+     * read() directly on the blocking socket (returns partial data). */
+    ssize_t n;
+    if (r->conn->type == connectionTypeTcp()) {
+        n = read(r->conn->fd, r->buf, UPGRADE_READ_BUF_SIZE);
+    } else {
+        n = connSyncRead(r->conn, r->buf, UPGRADE_READ_BUF_SIZE, UPGRADE_IO_TIMEOUT);
+    }
     if (n <= 0) return -1;
     r->pos = 0;
-    r->len = n;
+    r->len = (int)n;
     return 0;
 }
 
@@ -499,6 +508,7 @@ void upgradeCommand(client *c) {
             addReplyError(c, "Failed to connect to m_replica for handshake");
             return;
         }
+        anetBlock(NULL, initconn->fd);
 
         /* Send UPGRADE.INIT */
         const char *init_cmd = "*1\r\n$12\r\nUPGRADE.INIT\r\n";
@@ -536,6 +546,7 @@ void upgradeCommand(client *c) {
             return;
         }
 
+        anetBlock(NULL, conns[i]->fd);
         anetEnableTcpNoDelay(NULL, conns[i]->fd);
 
         /* Send UPGRADE.CHANNEL handshake */
@@ -567,11 +578,6 @@ void upgradeCommand(client *c) {
     }
 
     serverLog(LL_NOTICE, "UPGRADE: all %d channels connected. Starting receiver threads.", num_threads);
-
-    /* Make receiver connections blocking for thread I/O */
-    for (int i = 0; i < num_threads; i++) {
-        anetBlock(NULL, conns[i]->fd);
-    }
 
     /* Disable rehashing on receiver */
     hashtableSetResizePolicy(HASHTABLE_RESIZE_FORBID);
