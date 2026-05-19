@@ -282,13 +282,20 @@ static void dollyResetTimers(void) {
 }
 
 void cleanStateForDollySaveCommand(client *c) {
-    serverLog(LL_WARNING, DOLLY_LOG_PREFIX " starting clean-state for CRIU migration");
+    serverLog(LL_WARNING, DOLLY_LOG_PREFIX " starting clean-state for CRIU migration "
+              "(replid=%.40s replid2=%.40s primary_repl_offset=%lld primary_host=%s "
+              "cached_primary=%p repl_backlog=%p replicas=%d)",
+              server.replid, server.replid2, server.primary_repl_offset,
+              server.primary_host ? server.primary_host : "NULL",
+              (void *)server.cached_primary, (void *)server.repl_backlog,
+              (int)listLength(server.replicas));
 
     dollyResetRuntimeIdentity();
     dollyResetReplicationIdentity();
     dollyResetClusterIdentity();
     dollyResetTimers();
 
-    serverLog(LL_WARNING, DOLLY_LOG_PREFIX " complete");
+    serverLog(LL_WARNING, DOLLY_LOG_PREFIX " complete (replid=%.40s cached_primary=%p)",
+              server.replid, (void *)server.cached_primary);
     addReply(c, shared.ok);
 }

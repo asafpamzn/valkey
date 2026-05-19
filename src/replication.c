@@ -3494,6 +3494,8 @@ int replicaSendPsyncCommand(connection *conn) {
     } else if (server.cached_primary) {
         psync_replid = server.cached_primary->repl_data->replid;
         snprintf(psync_offset, sizeof(psync_offset), "%lld", server.cached_primary->repl_data->reploff + 1);
+        serverLog(LL_WARNING, "PSYNC: using cached_primary replid=%.40s offset=%s (server.replid=%.40s)",
+                  psync_replid, psync_offset, server.replid);
         serverLog(LL_NOTICE, "Trying a partial resynchronization (request %s:%s).", psync_replid, psync_offset);
     } else {
         serverLog(LL_NOTICE, "Partial resynchronization not possible (no cached primary)");
@@ -4479,9 +4481,20 @@ void replicationSetPrimary(char *ip, int port, int full_sync_required, bool disc
 
     /* Before destroying our primary state, create a cached primary using
      * our own parameters, to later PSYNC with the new primary. */
+    serverLog(LL_WARNING, "replicationSetPrimary: was_primary=%d full_sync_required=%d "
+              "cached_primary=%p replid=%.40s",
+              was_primary, full_sync_required,
+              (void *)server.cached_primary, server.replid);
     if (was_primary && !full_sync_required) {
         replicationDiscardCachedPrimary();
         replicationCachePrimaryUsingMyself();
+    }
+    if (server.cached_primary) {
+        serverLog(LL_WARNING, "replicationSetPrimary: after setup cached_primary replid=%.40s offset=%lld",
+                  server.cached_primary->repl_data->replid,
+                  server.cached_primary->repl_data->reploff);
+    } else {
+        serverLog(LL_WARNING, "replicationSetPrimary: no cached_primary after setup!");
     }
 
     /* Fire the role change modules event. */
