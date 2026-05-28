@@ -1699,6 +1699,9 @@ long long serverCron(struct aeEventLoop *eventLoop, long long id, void *clientDa
         run_with_period(CLUSTER_CRON_PERIOD_MS) clusterCron();
     }
 
+    /* Run the upgrade cron to check replica health */
+    run_with_period(1000) upgradeCron();
+
     /* Run the Sentinel timer if we are in sentinel mode. */
     if (server.sentinel_mode) sentinelTimer();
 
@@ -1903,6 +1906,9 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (server.active_expire_enabled && !server.import_mode && iAmPrimary()) {
         expire_cycle_time = activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
     }
+
+    /* Process upgrade key transfer if active */
+    upgradeProcessCycle();
 
     if (moduleCount()) {
         moduleFireServerEvent(VALKEYMODULE_EVENT_EVENTLOOP, VALKEYMODULE_SUBEVENT_EVENTLOOP_BEFORE_SLEEP, NULL);
@@ -3110,6 +3116,7 @@ void initServer(void) {
 
     commandlogInit();
     latencyMonitorInit();
+    upgradeInit();
     initSharedQueryBuf();
 
     /* Initialize ACL default password if it exists */

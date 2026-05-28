@@ -681,6 +681,23 @@ void replicationFeedStreamFromPrimaryStream(char *buf, size_t buflen) {
         }
     }
 
+    /* During UPGRADE delta phase, also forward to the upgrade connection */
+    if (server.upgrade_recv && server.upgrade_recv->delta_phase &&
+        server.upgrade_recv->delta_conn != NULL) {
+        /* Best-effort write to the upgrade delta connection (blocking) */
+        size_t remaining = buflen;
+        const char *p = buf;
+        while (remaining > 0) {
+            ssize_t n = connSyncWrite(server.upgrade_recv->delta_conn, (char *)p, remaining, 30000);
+            if (n <= 0) {
+                server.upgrade_recv->delta_conn = NULL;
+                break;
+            }
+            p += n;
+            remaining -= n;
+        }
+    }
+
     /* There must be replication backlog if having attached replicas. */
     if (listLength(server.replicas)) serverAssert(server.repl_backlog != NULL);
     if (server.repl_backlog) {

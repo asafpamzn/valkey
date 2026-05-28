@@ -4110,6 +4110,13 @@ static void prefetchCommandQueueKeys(client *c) {
 }
 
 int processInputBuffer(client *c) {
+    /* During UPGRADE bulk phase, buffer primary input without processing on m_replica.
+     * Once delta_phase=1, allow processing (writes will be forwarded). */
+    if (c == server.primary && server.upgrade_recv != NULL &&
+        !server.upgrade_recv->delta_phase) {
+        return C_OK;
+    }
+
     /* Parse the query buffer and/or execute already parsed commands. */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
            c->cmd_queue.off < c->cmd_queue.len) {

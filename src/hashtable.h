@@ -161,6 +161,9 @@ bool hashtableIncrementalFindGetResult(hashtableIncrementalFindState *state, voi
 /* Iteration & scan */
 size_t hashtableScan(hashtable *ht, size_t cursor, hashtableScanFunction fn, void *privdata);
 size_t hashtableScanDefrag(hashtable *ht, size_t cursor, hashtableScanFunction fn, void *privdata, void *(*defragfn)(void *), int flags);
+void hashtableIterateBucketRange(hashtable *ht, int stride, int offset, hashtableScanFunction fn, void *privdata);
+size_t hashtableNumBuckets(hashtable *ht);
+void hashtableSetUsedCount(hashtable *ht, size_t count);
 void hashtableInitIterator(hashtableIterator *iter, hashtable *ht, uint8_t flags);
 void hashtableRetargetIterator(hashtableIterator *iterator, hashtable *ht);
 void hashtableCleanupIterator(hashtableIterator *iter);

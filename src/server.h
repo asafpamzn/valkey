@@ -1084,6 +1084,51 @@ typedef struct replDataBuf {
     size_t peak;  /* Peak value of len during buffer lifetime */
 } replDataBuf;
 
+/* Online upgrade state (UPGRADE command) */
+#define UPGRADE_STATE_NONE       0
+#define UPGRADE_STATE_SCANNING   1
+#define UPGRADE_STATE_REPLAY     2
+#define UPGRADE_STATE_DRAINING   3
+#define UPGRADE_STATE_DONE       4
+#define UPGRADE_STATE_ABORTED    5
+#define UPGRADE_STATE_PAUSED     6
+
+#define UPGRADE_KEYS_PER_CYCLE   1000
+#define UPGRADE_DEFAULT_THREADS  10
+#define UPGRADE_MAX_THREADS      64
+
+/* State on m_replica side for serving UPGRADE channels */
+typedef struct upgradeSendWorker upgradeSendWorker;
+typedef struct upgradeRecvState {
+    int total_threads;
+    int channels_registered;         /* How many UPGRADE.CHANNEL have arrived */
+    connection *conns[UPGRADE_MAX_THREADS]; /* connections from UPGRADE.CHANNEL clients */
+    client *clients[UPGRADE_MAX_THREADS]; /* client objects (kept alive during transfer) */
+    pthread_t threads[UPGRADE_MAX_THREADS];
+    long long keys_inserted[UPGRADE_MAX_THREADS]; /* per-thread counters */
+    int thread_done[UPGRADE_MAX_THREADS];
+    int thread_error[UPGRADE_MAX_THREADS];
+    int all_done;                    /* Set to 1 when all threads finished */
+    int sending;                     /* 1 = sender threads are running */
+    upgradeSendWorker *workers;      /* Array of sender worker state */
+    long long snapshot_repl_offset;  /* primary_repl_offset captured at scan start */
+    /* Delta forwarding state */
+    connection *delta_conn;          /* connection kept open for delta forwarding (NULL if none) */
+    int delta_phase;                 /* 1 = forwarding delta, 0 = bulk phase or done */
+} upgradeRecvState;
+
+typedef struct upgradeState {
+    int state;
+    client *target_replica;
+    uint64_t target_client_id;
+    int current_db;
+    kvstoreIterator *iter;
+    long long keys_transferred;
+    long long keys_skipped;
+    long long bytes_transferred;
+    mstime_t start_time;
+} upgradeState;
+
 typedef struct {
     list *clients;
     size_t mem_usage_sum;
@@ -2389,6 +2434,10 @@ struct valkeyServer {
     /* Local environment */
     char *locale_collate;
     char *debug_context; /* A free-form string that has no impact on server except being included in a crash report. */
+    /* Online upgrade */
+    upgradeState *upgrade;
+    upgradeRecvState *upgrade_recv;  /* Receiver state for parallel upgrade (new_replica side) */
+    int upgrade_drained;             /* 1 = keys already drained via in-place upgrade (m_replica side) */
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -3182,6 +3231,7 @@ void replicationFeedReplicas(int dictid, robj **argv, int argc);
 void replicationFeedStreamFromPrimaryStream(char *buf, size_t buflen);
 void resetReplicationBuffer(void);
 void feedReplicationBuffer(char *buf, size_t len);
+void feedReplicationBufferWithObject(robj *o);
 void freeReplicaReferencedReplBuffer(client *replica);
 void replicationFeedMonitors(client *c, list *monitors, int dictid, robj **argv, int argc);
 void updateReplicasWaitingBgsave(int bgsaveerr, int type);
@@ -4125,6 +4175,15 @@ void readonlyCommand(client *c);
 void readwriteCommand(client *c);
 int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr);
 void dumpCommand(client *c);
+void upgradeCommand(client *c);
+void upgradeRestoreCommand(client *c);
+void upgradeChannelCommand(client *c);
+void upgradeDoneCommand(client *c);
+void upgradeInitCommand(client *c);
+void upgradeInit(void);
+void upgradeFree(void);
+void upgradeCron(void);
+void upgradeProcessCycle(void);
 void objectCommand(client *c);
 void memoryCommand(client *c);
 void clientCommand(client *c);
